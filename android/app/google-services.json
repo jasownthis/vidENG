@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "934398802463",
+    "project_id": "videng-reading-app",
+    "storage_bucket": "videng-reading-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:934398802463:android:be471a9473adb9dcedb32a",
+        "android_client_info": {
+          "package_name": "com.videng.readingapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBdnHDWR4TvHRFrGqssjV2Jfb_xYAK-I2g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
