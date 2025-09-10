@@ -9,14 +9,19 @@ import SplashScreen from './src/components/SplashScreen';
 import LoginScreen from './src/screens/LoginScreen';
 import GradeSelectionScreen from './src/screens/GradeSelectionScreen';
 import HomeScreen from './src/screens/HomeScreen';
+import BookListScreen from './src/screens/BookListScreen';
+import ImageBookReaderScreen from './src/screens/ImageBookReaderScreen';
 import authService from './src/services/authService';
-import { User } from './src/types';
+import { User, Book } from './src/types';
 
 const App: React.FC = () => {
   const [showSplash, setShowSplash] = useState(true);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showGradeSelection, setShowGradeSelection] = useState(false);
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'bookList' | 'bookReader'>('home');
+  const [selectedCategory, setSelectedCategory] = useState<'intensive' | 'extensive'>('intensive');
+  const [selectedBook, setSelectedBook] = useState<Book | null>(null);
 
   useEffect(() => {
     const unsubscribe = authService.onAuthStateChanged((user) => {
@@ -61,18 +66,39 @@ const App: React.FC = () => {
   };
 
   const handleNavigateToIntensive = () => {
-    // TODO: Navigate to intensive reading section
-    console.log('Navigate to Intensive Reading');
+    setSelectedCategory('intensive');
+    setCurrentScreen('bookList');
   };
 
   const handleNavigateToExtensive = () => {
-    // TODO: Navigate to extensive reading section
-    console.log('Navigate to Extensive Reading');
+    setSelectedCategory('extensive');
+    setCurrentScreen('bookList');
   };
 
   const handleNavigateToProfile = () => {
     // TODO: Navigate to profile screen
     console.log('Navigate to Profile');
+  };
+
+  const handleBookSelect = (book: Book) => {
+    setSelectedBook(book);
+    setCurrentScreen('bookReader');
+  };
+
+  const handleBackToHome = () => {
+    setCurrentScreen('home');
+    setSelectedBook(null);
+  };
+
+  const handleBackToBookList = () => {
+    setCurrentScreen('bookList');
+    setSelectedBook(null);
+  };
+
+  const handleBookComplete = () => {
+    // TODO: Navigate to quiz screen
+    setCurrentScreen('home');
+    setSelectedBook(null);
   };
 
   if (showSplash) {
@@ -102,6 +128,28 @@ const App: React.FC = () => {
   }
 
   // Main app content
+  if (currentScreen === 'bookList') {
+    return (
+      <BookListScreen
+        user={currentUser}
+        category={selectedCategory}
+        onBookSelect={handleBookSelect}
+        onBack={handleBackToHome}
+      />
+    );
+  }
+
+  if (currentScreen === 'bookReader' && selectedBook) {
+    return (
+      <ImageBookReaderScreen
+        user={currentUser}
+        book={selectedBook}
+        onBack={handleBackToBookList}
+        onBookComplete={handleBookComplete}
+      />
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
