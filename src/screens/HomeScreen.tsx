@@ -37,7 +37,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         {/* Header */}
         <View style={styles.headerContainer}>
           <Image 
-            source={require('../../assets /vidENG logo full.png')}
+            source={require('../../assets/videng_logo_full.png')}
             style={styles.logoImage}
             resizeMode="contain"
           />
