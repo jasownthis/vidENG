@@ -15,6 +15,7 @@ export interface User {
 export interface Book {
   id: string;
   title: string;
+  description?: string;
   coverUrl?: string;
   pages: BookPage[];
   gradeLevel: number;

@@ -3,6 +3,7 @@ import {
   SafeAreaView,
   StatusBar,
   StyleSheet,
+  Alert,
 } from 'react-native';
 
 import SplashScreen from './src/components/SplashScreen';
@@ -10,16 +11,18 @@ import LoginScreen from './src/screens/LoginScreen';
 import GradeSelectionScreen from './src/screens/GradeSelectionScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import BookListScreen from './src/screens/BookListScreen';
+import BookDetailScreen from './src/screens/BookDetailScreen';
 import ImageBookReaderScreen from './src/screens/ImageBookReaderScreen';
+import QuizScreen from './src/screens/QuizScreen';
 import authService from './src/services/authService';
-import { User, Book } from './src/types';
+import { User, Book, QuizResult } from './src/types';
 
 const App: React.FC = () => {
   const [showSplash, setShowSplash] = useState(true);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showGradeSelection, setShowGradeSelection] = useState(false);
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'bookList' | 'bookReader'>('home');
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'bookList' | 'bookDetail' | 'bookReader' | 'quiz'>('home');
   const [selectedCategory, setSelectedCategory] = useState<'intensive' | 'extensive'>('intensive');
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
 
@@ -82,7 +85,17 @@ const App: React.FC = () => {
 
   const handleBookSelect = (book: Book) => {
     setSelectedBook(book);
+    setCurrentScreen('bookDetail');
+  };
+
+  const handleStartReading = (book: Book) => {
+    setSelectedBook(book);
     setCurrentScreen('bookReader');
+  };
+
+  const handleStartQuiz = (book: Book) => {
+    setSelectedBook(book);
+    setCurrentScreen('quiz');
   };
 
   const handleBackToHome = () => {
@@ -95,10 +108,33 @@ const App: React.FC = () => {
     setSelectedBook(null);
   };
 
+  const handleBackToBookDetail = () => {
+    setCurrentScreen('bookDetail');
+  };
+
   const handleBookComplete = () => {
     // TODO: Navigate to quiz screen
     setCurrentScreen('home');
     setSelectedBook(null);
+  };
+
+  const handleQuizComplete = (result: QuizResult) => {
+    // TODO: Save quiz result to Firebase
+    console.log('Quiz completed:', result);
+    Alert.alert(
+      'Quiz Completed!',
+      result.passed 
+        ? `Congratulations! You earned a sticker! 🎉`
+        : 'Keep practicing and try again! 💪',
+      [
+        {
+          text: 'OK',
+          onPress: () => {
+            setCurrentScreen('bookDetail'); // Go back to book detail
+          },
+        },
+      ]
+    );
   };
 
   if (showSplash) {
@@ -139,13 +175,36 @@ const App: React.FC = () => {
     );
   }
 
+  if (currentScreen === 'bookDetail' && selectedBook) {
+    return (
+      <BookDetailScreen
+        user={currentUser}
+        book={selectedBook}
+        onBack={handleBackToBookList}
+        onStartReading={handleStartReading}
+        onStartQuiz={handleStartQuiz}
+      />
+    );
+  }
+
   if (currentScreen === 'bookReader' && selectedBook) {
     return (
       <ImageBookReaderScreen
         user={currentUser}
         book={selectedBook}
-        onBack={handleBackToBookList}
+        onBack={handleBackToBookDetail}
         onBookComplete={handleBookComplete}
+      />
+    );
+  }
+
+  if (currentScreen === 'quiz' && selectedBook) {
+    return (
+      <QuizScreen
+        user={currentUser}
+        book={selectedBook}
+        onBack={handleBackToBookDetail}
+        onQuizComplete={handleQuizComplete}
       />
     );
   }

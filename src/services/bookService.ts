@@ -7,7 +7,8 @@ class BookService {
   private mockBooks: Book[] = [
     {
       id: 'book_002',
-      title: 'New Reading Book',
+      title: 'A Mother in Mannville',
+      description: 'A heartwarming story about Jerry, a young boy at an orphanage in the mountains, who befriends the narrator and helps him with daily chores. Through their friendship, we discover the power of imagination, loyalty, and the deep human need for connection and belonging.',
       coverUrl: '', // Will be generated from first page
       pages: [
         { pageNumber: 1, imageUrl: '../../assets/books/pages/book_002_page-1.png' },
