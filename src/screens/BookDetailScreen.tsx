@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Book, BookProgress, User, AudioRecording } from '../types';
 import bookService from '../services/bookService';
+import storageService from '../services/storageService';
 
 const { width } = Dimensions.get('window');
 
@@ -59,36 +60,13 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
         setProgress(userProgress);
       }
       
-      // Load user's audio recordings for this book
-      // TODO: Implement getAudioRecordings in bookService
-      // const recordings = await bookService.getAudioRecordings(user.id, book.id);
-      // setAudioRecordings(recordings);
-      
-      // For now, mock some audio recordings
-      const mockRecordings: AudioRecording[] = [
-        {
-          id: `audio_${book.id}_1`,
-          userId: user.id,
-          bookId: book.id,
-          pageNumber: 1,
-          rawAudioUrl: 'mock_url_page_1.wav',
-          processedAudioUrl: 'mock_url_page_1.mp3',
-          duration: 45, // 45 seconds
-          recordedAt: new Date(Date.now() - 86400000), // Yesterday
-          isProcessed: true,
-        },
-        {
-          id: `audio_${book.id}_2`,
-          userId: user.id,
-          bookId: book.id,
-          pageNumber: 2,
-          rawAudioUrl: 'mock_url_page_2.wav',
-          duration: 38,
-          recordedAt: new Date(Date.now() - 43200000), // 12 hours ago
-          isProcessed: false,
-        },
-      ];
-      setAudioRecordings(mockRecordings);
+      // Load user's audio recordings for this book from Firebase Storage
+      const recordings = await storageService.listUserBookAudio(
+        user.id, 
+        book.id, 
+        user.grade
+      );
+      setAudioRecordings(recordings);
       
     } catch (error) {
       console.error('Error loading book data:', error);
@@ -154,6 +132,44 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
     return 'Take Quiz & Earn Stickers';
   };
 
+  const playAudio = async (audioRecording: AudioRecording) => {
+    try {
+      if (!audioRecording.rawAudioUrl) {
+        Alert.alert('Error', 'Audio file not available');
+        return;
+      }
+
+      // For now, show a simple alert. In production, you'd use an audio player
+      Alert.alert(
+        `🎵 Playing Audio - Page ${audioRecording.pageNumber}`,
+        `Duration: ${formatDuration(audioRecording.duration)}\nRecorded: ${formatDate(audioRecording.recordedAt)}`,
+        [
+          { text: 'Stop', style: 'cancel' },
+          { 
+            text: 'Open in Browser', 
+            onPress: () => {
+              // This would open the audio URL in browser for now
+              console.log('Audio URL:', audioRecording.rawAudioUrl);
+            }
+          }
+        ]
+      );
+      
+      // TODO: Implement proper audio playback with react-native-sound or similar
+      // const sound = new Sound(audioRecording.rawAudioUrl, '', (error) => {
+      //   if (error) {
+      //     Alert.alert('Error', 'Failed to load audio');
+      //     return;
+      //   }
+      //   sound.play();
+      // });
+      
+    } catch (error) {
+      console.error('Error playing audio:', error);
+      Alert.alert('Error', 'Failed to play audio');
+    }
+  };
+
   const renderAudioItem = ({ item }: { item: AudioRecording }) => (
     <View style={styles.audioItem}>
       <View style={styles.audioInfo}>
@@ -179,10 +195,7 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
           { opacity: item.isProcessed ? 1 : 0.5 }
         ]}
         disabled={!item.isProcessed}
-        onPress={() => {
-          // TODO: Implement audio playback
-          Alert.alert('Play Audio', `Playing audio for Page ${item.pageNumber}`);
-        }}
+        onPress={() => playAudio(item)}
       >
         <Text style={styles.playButtonText}>▶</Text>
       </TouchableOpacity>

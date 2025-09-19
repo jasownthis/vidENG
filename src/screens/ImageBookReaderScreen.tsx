@@ -9,10 +9,13 @@ import {
   StatusBar,
   Image,
   ActivityIndicator,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Book, BookProgress, User } from '../types';
 import bookService from '../services/bookService';
+import audioService, { RecordingSession } from '../services/audioService';
+import UploadProgressModal from '../components/UploadProgressModal';
 
 const { width, height } = Dimensions.get('window');
 
@@ -34,6 +37,13 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [progress, setProgress] = useState<BookProgress | null>(null);
   const [startTime, setStartTime] = useState<Date>(new Date());
   const [imageLoading, setImageLoading] = useState(true);
+  
+  // Audio recording states
+  const [recordingSession, setRecordingSession] = useState<RecordingSession | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [localAudioPath, setLocalAudioPath] = useState<string | null>(null);
+  const [recordingsByPage, setRecordingsByPage] = useState<{ [page: number]: string }>({});
 
   // Page images mapping - using the converted PDF images
   // Using a more reliable approach to avoid caching issues
@@ -54,6 +64,42 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   useEffect(() => {
     loadProgress();
     setStartTime(new Date());
+    
+    // Start recording when component mounts
+    startRecordingForPage(currentPage);
+    
+    return () => {
+      // Cleanup on unmount
+      audioService.cleanup();
+    };
+  }, []);
+
+  // Handle back button - prevent closing during upload
+  useEffect(() => {
+    const backAction = () => {
+      if (isUploading) {
+        Alert.alert(
+          'Upload in Progress',
+          'Your audio is being saved. Please wait before leaving.',
+          [{ text: 'OK' }]
+        );
+        return true; // Prevent back action
+      }
+      return false; // Allow back action
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
+    return () => backHandler.remove();
+  }, [isUploading]);
+
+  // Update recording session state periodically
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const session = audioService.getCurrentSession();
+      setRecordingSession(session);
+    }, 1000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const loadProgress = async () => {
@@ -103,51 +149,159 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
     }
   };
 
-  const handlePreviousPage = () => {
-    if (currentPage > 1) {
-      const newPage = currentPage - 1;
-      setImageLoading(true); // Show loading immediately
-      setCurrentPage(newPage);
-      updateProgress(newPage);
+  // Audio recording functions
+  const startRecordingForPage = async (pageNumber: number) => {
+    try {
+      const success = await audioService.startRecording(pageNumber);
+      if (!success) {
+        Alert.alert('Recording Error', 'Could not start recording for this page.');
+      }
+    } catch (error) {
+      console.error('Error starting recording:', error);
     }
   };
 
-  const handleNextPage = () => {
-    if (currentPage < totalPages) {
-      const newPage = currentPage + 1;
-      setImageLoading(true); // Show loading immediately
+  const stopCurrentRecording = async (): Promise<string | null> => {
+    try {
+      const filePath = await audioService.stopRecording();
+      setLocalAudioPath(filePath);
+      if (filePath) {
+        // Store the recording path for the current page
+        setRecordingsByPage(prev => ({ ...prev, [currentPage]: filePath }));
+      }
+      return filePath;
+    } catch (error) {
+      console.error('Error stopping recording:', error);
+      return null;
+    }
+  };
+
+  const handlePreviousPage = async () => {
+    if (currentPage > 1) {
+      // Stop current recording and start new one for previous page
+      await stopCurrentRecording();
+      
+      const newPage = currentPage - 1;
+      setImageLoading(true);
       setCurrentPage(newPage);
       updateProgress(newPage);
+      
+      // Start recording for the new page
+      await startRecordingForPage(newPage);
+    }
+  };
+
+  const handleNextPage = async () => {
+    if (currentPage < totalPages) {
+      // Stop current recording and start new one for next page
+      await stopCurrentRecording();
+      
+      const newPage = currentPage + 1;
+      setImageLoading(true);
+      setCurrentPage(newPage);
+      updateProgress(newPage);
+      
+      // Start recording for the new page
+      await startRecordingForPage(newPage);
     }
   };
 
   const handleSubmitBook = () => {
     Alert.alert(
       'Submit Book',
-      'Are you sure you want to submit this book? You can take the quiz after submitting.',
+      'This will save your audio recording and submit the book. You can then take the quiz.',
       [
         {
           text: 'Cancel',
           style: 'cancel',
         },
         {
-          text: 'Submit',
-          onPress: async () => {
-            try {
-              await bookService.submitBook(user.id, book.id);
-              Alert.alert(
-                'Book Submitted!',
-                'Great job! You can now take the comprehension quiz.',
-                [{ text: 'OK', onPress: onBookComplete }]
-              );
-            } catch (error) {
-              console.error('Error submitting book:', error);
-              Alert.alert('Error', 'Failed to submit book');
-            }
-          },
+          text: 'Submit & Save Audio',
+          onPress: handleMandatoryUpload,
         },
       ]
     );
+  };
+
+  const handleMandatoryUpload = async () => {
+    try {
+      setIsUploading(true);
+      setUploadProgress(0);
+
+      // Step 1: Stop current recording
+      const currentFilePath = await stopCurrentRecording();
+
+      // Build list of pages to upload (all recorded pages)
+      const pagesToUpload = Object.keys(recordingsByPage)
+        .map(p => parseInt(p, 10))
+        .sort((a, b) => a - b);
+
+      if (currentFilePath && !pagesToUpload.includes(currentPage)) {
+        pagesToUpload.push(currentPage);
+      }
+
+      if (pagesToUpload.length === 0) {
+        Alert.alert('Error', 'No audio recording found to save.');
+        setIsUploading(false);
+        return;
+      }
+
+      // Sequentially upload each page's audio, updating global progress
+      const total = pagesToUpload.length;
+      for (let index = 0; index < total; index++) {
+        const pageNum = pagesToUpload[index];
+        const filePathForPage =
+          pageNum === currentPage && currentFilePath
+            ? currentFilePath
+            : recordingsByPage[pageNum];
+
+        if (!filePathForPage) {
+          continue;
+        }
+
+        const baseProgress = Math.floor((index / total) * 100);
+        const perFileUpdater = (p: number) => {
+          const weighted = baseProgress + Math.floor((p / 100) * (100 / total));
+          setUploadProgress(Math.min(99, weighted));
+        };
+
+        const result = await audioService.uploadAudioWithMerge(
+          filePathForPage,
+          user.id,
+          book.id,
+          user.grade,
+          pageNum,
+          perFileUpdater
+        );
+
+        if (!result.success) {
+          throw new Error(result.error || `Upload failed for page ${pageNum}`);
+        }
+      }
+      setUploadProgress(100);
+
+      // Step 3: Update book progress as submitted
+      await bookService.submitBook(user.id, book.id);
+
+      // Step 4: Success!
+      setIsUploading(false);
+      setRecordingsByPage({});
+      Alert.alert(
+        'Success! 🎉',
+        'Your audio has been saved and book submitted! You can now take the quiz.',
+        [{ text: 'Continue', onPress: onBookComplete }]
+      );
+
+    } catch (error) {
+      console.error('Error in mandatory upload:', error);
+      setIsUploading(false);
+      
+      Alert.alert(
+        'Upload Failed',
+        error instanceof Error ? error.message : 'Failed to save audio. Please check your internet connection and try again.',
+        [{ text: 'OK' }]
+      );
+    }
   };
 
   const handleImageLoad = () => {
@@ -176,9 +330,25 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           </Text>
         </View>
         
-        <TouchableOpacity style={styles.submitButton} onPress={handleSubmitBook}>
-          <Text style={styles.submitButtonText}>Submit</Text>
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          {/* Recording Status Indicator */}
+          {recordingSession?.isRecording && (
+            <View style={styles.recordingIndicator}>
+              <View style={styles.recordingDot} />
+              <Text style={styles.recordingText}>
+                {Math.floor(recordingSession.duration / 60)}:{(recordingSession.duration % 60).toString().padStart(2, '0')}
+              </Text>
+            </View>
+          )}
+          
+          <TouchableOpacity 
+            style={[styles.submitButton, isUploading && styles.disabledButton]} 
+            onPress={handleSubmitBook}
+            disabled={isUploading}
+          >
+            <Text style={styles.submitButtonText}>Submit</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Book Page Image */}
@@ -250,6 +420,14 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           {Math.round((currentPage / totalPages) * 100)}% Complete
         </Text>
       </View>
+
+      {/* Upload Progress Modal */}
+      <UploadProgressModal
+        visible={isUploading}
+        progress={uploadProgress}
+        message="Saving your audio recording..."
+        subMessage="Please don't close the app"
+      />
     </SafeAreaView>
   );
 };
@@ -297,11 +475,39 @@ const styles = StyleSheet.create({
     color: '#666',
     marginTop: 2,
   },
+  headerRight: {
+    alignItems: 'center',
+    flexDirection: 'row',
+  },
+  recordingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF3030',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginRight: 10,
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ffffff',
+    marginRight: 6,
+  },
+  recordingText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
   submitButton: {
     backgroundColor: '#2E7D32',
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 6,
+  },
+  disabledButton: {
+    backgroundColor: '#E0E0E0',
   },
   submitButtonText: {
     color: '#ffffff',
