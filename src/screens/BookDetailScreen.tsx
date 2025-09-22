@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Book, BookProgress, User, AudioRecording } from '../types';
 import bookService from '../services/bookService';
 import storageService from '../services/storageService';
+import Sound from 'react-native-nitro-sound';
 
 const { width } = Dimensions.get('window');
 
@@ -34,11 +35,27 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
 }) => {
   const [progress, setProgress] = useState<BookProgress | null>(null);
   const [audioRecordings, setAudioRecordings] = useState<AudioRecording[]>([]);
+  const [pageAudios, setPageAudios] = useState<Array<{ pageNumber: number; urls: string[]; recordedAt: Date; count: number }>>([]);
   const [loading, setLoading] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playingPage, setPlayingPage] = useState<number | null>(null);
+  const playbackQueueRef = useRef<string[]>([]);
+  const playbackIndexRef = useRef<number>(0);
 
   useEffect(() => {
     loadBookData();
   }, [book.id, user.id]);
+
+  useEffect(() => {
+    // cleanup listeners on unmount
+    return () => {
+      try {
+        Sound.stopPlayer();
+        Sound.removePlayBackListener?.();
+        Sound.removePlaybackEndListener?.();
+      } catch {}
+    };
+  }, []);
 
   const loadBookData = async () => {
     try {
@@ -67,6 +84,31 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
         user.grade
       );
       setAudioRecordings(recordings);
+
+      // Group by page into a single play item per page
+      // Ensure segments are ordered oldest -> newest for natural playback
+      const byPage: { [page: number]: AudioRecording[] } = {};
+      for (const r of recordings) {
+        if (!r.rawAudioUrl) continue;
+        const page = r.pageNumber;
+        if (!byPage[page]) byPage[page] = [];
+        byPage[page].push(r);
+      }
+      const pageList = Object.keys(byPage)
+        .map(k => parseInt(k, 10))
+        .sort((a, b) => a - b)
+        .map(page => {
+          const segs = byPage[page]
+            .slice()
+            .sort((a, b) => a.recordedAt.getTime() - b.recordedAt.getTime()); // ascending time
+          return {
+            pageNumber: page,
+            urls: segs.map(s => s.rawAudioUrl!) as string[],
+            recordedAt: segs[segs.length - 1]?.recordedAt || new Date(),
+            count: segs.length,
+          };
+        });
+      setPageAudios(pageList);
       
     } catch (error) {
       console.error('Error loading book data:', error);
@@ -132,37 +174,57 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
     return 'Take Quiz & Earn Stickers';
   };
 
-  const playAudio = async (audioRecording: AudioRecording) => {
+  const playAudio = async (entry: { pageNumber: number; urls: string[] }) => {
     try {
-      if (!audioRecording.rawAudioUrl) {
-        Alert.alert('Error', 'Audio file not available');
+      const page = entry.pageNumber;
+      const queue = entry.urls;
+      if (queue.length === 0) {
+        Alert.alert('Error', 'No audio segments found for this page');
         return;
       }
 
-      // For now, show a simple alert. In production, you'd use an audio player
-      Alert.alert(
-        `🎵 Playing Audio - Page ${audioRecording.pageNumber}`,
-        `Duration: ${formatDuration(audioRecording.duration)}\nRecorded: ${formatDate(audioRecording.recordedAt)}`,
-        [
-          { text: 'Stop', style: 'cancel' },
-          { 
-            text: 'Open in Browser', 
-            onPress: () => {
-              // This would open the audio URL in browser for now
-              console.log('Audio URL:', audioRecording.rawAudioUrl);
-            }
-          }
-        ]
-      );
-      
-      // TODO: Implement proper audio playback with react-native-sound or similar
-      // const sound = new Sound(audioRecording.rawAudioUrl, '', (error) => {
-      //   if (error) {
-      //     Alert.alert('Error', 'Failed to load audio');
-      //     return;
-      //   }
-      //   sound.play();
-      // });
+      // If already playing this page, toggle stop
+      if (isPlaying && playingPage === page) {
+        await Sound.stopPlayer();
+        setIsPlaying(false);
+        setPlayingPage(null);
+        return;
+      }
+
+      // Reset previous listeners and playback
+      try {
+        await Sound.stopPlayer();
+        Sound.removePlayBackListener?.();
+        Sound.removePlaybackEndListener?.();
+      } catch {}
+
+      // Prime queue
+      playbackQueueRef.current = queue;
+      playbackIndexRef.current = 0;
+      setPlayingPage(page);
+      setIsPlaying(true);
+
+      // Chain playback
+      const startAtIndex = async (idx: number) => {
+        if (idx >= playbackQueueRef.current.length) {
+          setIsPlaying(false);
+          setPlayingPage(null);
+          return;
+        }
+        const url = playbackQueueRef.current[idx];
+        await Sound.startPlayer(url);
+      };
+
+      Sound.addPlaybackEndListener?.(() => {
+        playbackIndexRef.current += 1;
+        startAtIndex(playbackIndexRef.current).catch(() => {
+          setIsPlaying(false);
+          setPlayingPage(null);
+        });
+      });
+
+      // Start first
+      await startAtIndex(0);
       
     } catch (error) {
       console.error('Error playing audio:', error);
@@ -170,34 +232,27 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
     }
   };
 
-  const renderAudioItem = ({ item }: { item: AudioRecording }) => (
+  const renderPageAudioItem = ({ item }: { item: { pageNumber: number; urls: string[]; recordedAt: Date; count: number } }) => (
     <View style={styles.audioItem}>
       <View style={styles.audioInfo}>
         <View style={styles.audioHeader}>
           <Text style={styles.audioTitle}>Page {item.pageNumber}</Text>
-          <Text style={styles.audioDuration}>{formatDuration(item.duration)}</Text>
+          <Text style={styles.audioDuration}>{item.count} segment{item.count > 1 ? 's' : ''}</Text>
         </View>
         <Text style={styles.audioDate}>{formatDate(item.recordedAt)}</Text>
-        <View style={styles.audioStatus}>
-          <View style={[
-            styles.statusDot,
-            { backgroundColor: item.isProcessed ? '#4CAF50' : '#FF9800' }
-          ]} />
-          <Text style={styles.statusText}>
-            {item.isProcessed ? 'Processed' : 'Processing...'}
-          </Text>
-        </View>
       </View>
       
       <TouchableOpacity 
         style={[
           styles.playButton,
-          { opacity: item.isProcessed ? 1 : 0.5 }
+          { opacity: 1 },
         ]}
-        disabled={!item.isProcessed}
+        disabled={false}
         onPress={() => playAudio(item)}
       >
-        <Text style={styles.playButtonText}>▶</Text>
+        <Text style={styles.playButtonText}>
+          {isPlaying && playingPage === item.pageNumber ? '⏹' : '▶'}
+        </Text>
       </TouchableOpacity>
     </View>
   );
@@ -325,7 +380,7 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
         <View style={styles.audioSection}>
           <Text style={styles.sectionTitle}>Your Audio Recordings</Text>
           
-          {audioRecordings.length === 0 ? (
+          {pageAudios.length === 0 ? (
             <View style={styles.emptyAudioContainer}>
               <Text style={styles.emptyAudioIcon}>🎤</Text>
               <Text style={styles.emptyAudioText}>No audio recordings yet</Text>
@@ -335,9 +390,9 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
             </View>
           ) : (
             <FlatList
-              data={audioRecordings}
-              renderItem={renderAudioItem}
-              keyExtractor={(item) => item.id}
+              data={pageAudios}
+              renderItem={renderPageAudioItem}
+              keyExtractor={(item) => `page_${item.pageNumber}`}
               scrollEnabled={false}
               style={styles.audioList}
             />
