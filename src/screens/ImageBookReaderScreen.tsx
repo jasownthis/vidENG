@@ -43,7 +43,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [localAudioPath, setLocalAudioPath] = useState<string | null>(null);
-  const [recordingsByPage, setRecordingsByPage] = useState<{ [page: number]: string }>({});
+  const [recordingsByPage, setRecordingsByPage] = useState<{ [page: number]: string[] }>({});
 
   // Page images mapping - using the converted PDF images
   // Using a more reliable approach to avoid caching issues
@@ -166,8 +166,11 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       const filePath = await audioService.stopRecording();
       setLocalAudioPath(filePath);
       if (filePath) {
-        // Store the recording path for the current page
-        setRecordingsByPage(prev => ({ ...prev, [currentPage]: filePath }));
+        // Append the recording path for the current page (support multiple segments per page)
+        setRecordingsByPage(prev => {
+          const existing = prev[currentPage] || [];
+          return { ...prev, [currentPage]: [...existing, filePath] };
+        });
       }
       return filePath;
     } catch (error) {
@@ -231,14 +234,19 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       // Step 1: Stop current recording
       const currentFilePath = await stopCurrentRecording();
 
+      // Build a local copy including the just recorded segment
+      const localMap: { [page: number]: string[] } = { ...recordingsByPage };
+      if (currentFilePath) {
+        const existing = localMap[currentPage] || [];
+        if (!existing.includes(currentFilePath)) {
+          localMap[currentPage] = [...existing, currentFilePath];
+        }
+      }
+
       // Build list of pages to upload (all recorded pages)
-      const pagesToUpload = Object.keys(recordingsByPage)
+      const pagesToUpload = Object.keys(localMap)
         .map(p => parseInt(p, 10))
         .sort((a, b) => a - b);
-
-      if (currentFilePath && !pagesToUpload.includes(currentPage)) {
-        pagesToUpload.push(currentPage);
-      }
 
       if (pagesToUpload.length === 0) {
         Alert.alert('Error', 'No audio recording found to save.');
@@ -246,36 +254,35 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         return;
       }
 
-      // Sequentially upload each page's audio, updating global progress
-      const total = pagesToUpload.length;
-      for (let index = 0; index < total; index++) {
-        const pageNum = pagesToUpload[index];
-        const filePathForPage =
-          pageNum === currentPage && currentFilePath
-            ? currentFilePath
-            : recordingsByPage[pageNum];
+      // Flatten total segments count for progress
+      let totalSegments = 0;
+      pagesToUpload.forEach(p => { totalSegments += (localMap[p] || []).length; });
+      if (totalSegments === 0) totalSegments = 1;
 
-        if (!filePathForPage) {
-          continue;
-        }
+      let uploadedSegments = 0;
+      for (let i = 0; i < pagesToUpload.length; i++) {
+        const pageNum = pagesToUpload[i];
+        const segments = localMap[pageNum] || [];
+        for (let s = 0; s < segments.length; s++) {
+          const segmentPath = segments[s];
+          const baseProgress = Math.floor((uploadedSegments / totalSegments) * 100);
+          const perFileUpdater = (p: number) => {
+            const weighted = baseProgress + Math.floor((p / 100) * (100 / totalSegments));
+            setUploadProgress(Math.min(99, weighted));
+          };
 
-        const baseProgress = Math.floor((index / total) * 100);
-        const perFileUpdater = (p: number) => {
-          const weighted = baseProgress + Math.floor((p / 100) * (100 / total));
-          setUploadProgress(Math.min(99, weighted));
-        };
-
-        const result = await audioService.uploadAudioWithMerge(
-          filePathForPage,
-          user.id,
-          book.id,
-          user.grade,
-          pageNum,
-          perFileUpdater
-        );
-
-        if (!result.success) {
-          throw new Error(result.error || `Upload failed for page ${pageNum}`);
+          const result = await audioService.uploadSegment(
+            segmentPath,
+            user.id,
+            book.id,
+            user.grade,
+            pageNum,
+            perFileUpdater
+          );
+          if (!result.success) {
+            throw new Error(result.error || `Upload failed for page ${pageNum}`);
+          }
+          uploadedSegments += 1;
         }
       }
       setUploadProgress(100);

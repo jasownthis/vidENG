@@ -5,6 +5,7 @@ import Sound, {
 } from 'react-native-nitro-sound';
 import { Platform, PermissionsAndroid, Alert } from 'react-native';
 import storageService from './storageService';
+import * as RNFS from 'react-native-fs';
 import NetInfo from '@react-native-community/netinfo';
 
 export interface RecordingSession {
@@ -207,46 +208,12 @@ class AudioService {
     }
   }
 
-  /**
-   * Merge two WAV audio blobs
-   * This is a simplified version - for production, you'd want a more robust WAV merging library
-   */
-  async mergeWavBlobs(existingBlob: Blob, newBlob: Blob): Promise<Blob> {
-    try {
-      // For now, we'll implement a simple concatenation
-      // In a production app, you'd want to use a proper WAV merging library
-      // that handles headers, sample rates, etc. correctly
-      
-      console.log('Merging WAV files...');
-      console.log('Existing blob size:', existingBlob.size);
-      console.log('New blob size:', newBlob.size);
-
-      // Simple approach: combine the blobs
-      // Note: This is simplified - proper WAV merging requires header manipulation
-      const existingArrayBuffer = await existingBlob.arrayBuffer();
-      const newArrayBuffer = await newBlob.arrayBuffer();
-      
-      // For demonstration, we'll just append the new audio data
-      // In production, you'd need proper WAV header handling
-      const combinedBuffer = new Uint8Array(existingArrayBuffer.byteLength + newArrayBuffer.byteLength);
-      combinedBuffer.set(new Uint8Array(existingArrayBuffer), 0);
-      combinedBuffer.set(new Uint8Array(newArrayBuffer), existingArrayBuffer.byteLength);
-      
-      const mergedBlob = new Blob([combinedBuffer], { type: 'audio/wav' });
-      
-      console.log('Merged blob size:', mergedBlob.size);
-      return mergedBlob;
-
-    } catch (error) {
-      console.error('Error merging WAV blobs:', error);
-      throw error;
-    }
-  }
+  // FFmpeg removal: no local concatenation; segments are uploaded individually
 
   /**
-   * Upload audio with merge logic - THE CORE FUNCTION
+   * Upload a single recorded segment (no merge). Returns download URL.
    */
-  async uploadAudioWithMerge(
+  async uploadSegment(
     localFilePath: string,
     userId: string,
     bookId: string,
@@ -266,51 +233,22 @@ class AudioService {
       // Step 2: Convert local file to blob
       const newAudioBlob = await this.audioFileToBlob(localFilePath);
       onProgress?.(20);
+      onProgress?.(40);
 
-      // Step 3: Check if existing audio exists for this page
-      const existingAudio = await storageService.checkPageAudioExists(
-        userId, bookId, gradeLevel, pageNumber
-      );
-      onProgress?.(30);
-
-      let finalBlob: Blob;
-      let uploadTimestamp = Date.now();
-
-      if (existingAudio.exists && existingAudio.downloadURL) {
-        // Step 4a: Download existing audio and merge
-        console.log('Existing audio found, merging...');
-        
-        const existingBlob = await storageService.downloadAudioFile(existingAudio.downloadURL);
-        onProgress?.(50);
-        
-        finalBlob = await this.mergeWavBlobs(existingBlob, newAudioBlob);
-        onProgress?.(70);
-        
-        // Delete the old file before uploading the new merged one
-        if (existingAudio.filePath) {
-          await storageService.deleteAudioFile(existingAudio.filePath);
-        }
-      } else {
-        // Step 4b: No existing audio, use new recording as-is
-        console.log('No existing audio, uploading new recording...');
-        finalBlob = newAudioBlob;
-        onProgress?.(70);
-      }
-
-      // Step 5: Upload the final audio blob
+      // Step 3: Upload this segment as-is (no merge)
+      const timestamp = Date.now();
       const downloadURL = await storageService.uploadAudioFile(
-        finalBlob,
+        newAudioBlob,
         userId,
         bookId,
         gradeLevel,
         pageNumber,
-        uploadTimestamp
+        timestamp
       );
       onProgress?.(90);
 
-      // Step 6: Clean up local file
+      // Step 4: Clean up local file (optional)
       try {
-        // TODO: Delete local file after successful upload
         // await RNFS.unlink(localFilePath);
       } catch (cleanupError) {
         console.warn('Could not delete local file:', cleanupError);

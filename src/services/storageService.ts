@@ -146,13 +146,56 @@ class StorageService {
       
       const listResult = await listAll(folderRef);
       const audioRecordings: AudioRecording[] = [];
+      const items = listResult.items;
+
+      // Prefer master files per page if present
+      const masterRegex = /^page_(\d+)_master\.(m4a|mp4|aac|wav)$/;
+      const segmentRegex = /^page_(\d+)_(\d+)\.(wav|mp4|m4a|aac)$/;
+
+      // First, collect masters by page
+      const mastersByPage: Record<number, typeof items[number]> = {} as any;
+      for (const item of items) {
+        const m = item.name.match(masterRegex);
+        if (m) {
+          const page = parseInt(m[1], 10);
+          mastersByPage[page] = item;
+        }
+      }
       
       // Process each audio file
-      for (const item of listResult.items) {
+      for (const item of items) {
         try {
-          // Parse filename: page_{pageNumber}_{timestamp}.wav
           const filename = item.name;
-          const match = filename.match(/page_(\d+)_(\d+)\.wav/);
+          // Skip non-audio files
+          if (!segmentRegex.test(filename) && !masterRegex.test(filename)) continue;
+
+          // If master exists for this page, skip segments for that page
+          const masterMatch = filename.match(masterRegex);
+          if (!masterMatch) {
+            const seg = filename.match(segmentRegex);
+            if (seg) {
+              const segPage = parseInt(seg[1], 10);
+              if (mastersByPage[segPage]) {
+                continue; // master present, ignore segment
+              }
+            }
+          }
+
+          // Parse either master or segment
+          let match = filename.match(/page_(\d+)_master\.(m4a|mp4|aac|wav)/);
+          let isMaster = false;
+          let pageNumber = 0;
+          let timestamp = 0;
+          if (match) {
+            isMaster = true;
+            pageNumber = parseInt(match[1], 10);
+            timestamp = Date.now(); // unknown, use now
+          } else {
+            match = filename.match(/page_(\d+)_(\d+)\.(wav|mp4|m4a|aac)/);
+            if (!match) continue;
+            pageNumber = parseInt(match[1], 10);
+            timestamp = parseInt(match[2], 10);
+          }
           
           if (match) {
             const pageNumber = parseInt(match[1], 10);
@@ -170,10 +213,10 @@ class StorageService {
               bookId,
               pageNumber,
               rawAudioUrl: downloadURL,
-              processedAudioUrl: downloadURL, // Same as raw for WAV-only approach
+              processedAudioUrl: downloadURL,
               duration: 0, // TODO: Calculate from metadata or file analysis
               recordedAt: new Date(timestamp),
-              isProcessed: true, // Always true for WAV-only approach
+              isProcessed: true,
             };
             
             audioRecordings.push(audioRecording);

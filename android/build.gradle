@@ -6,10 +6,15 @@ buildscript {
         targetSdkVersion = 36
         ndkVersion = "27.0.12077973"
         kotlinVersion = "2.1.20"
+        // ffmpeg-kit configuration
+        ffmpegKitPackage = "full" // options: min, full, https variants
+        ffmpegKitVersion = "4.5.LTS"
     }
     repositories {
         google()
         mavenCentral()
+        maven { url 'https://www.jitpack.io' }
+        maven { url 'https://www.arthenica.com/maven' }
     }
     dependencies {
         classpath("com.android.tools.build:gradle")
@@ -19,3 +24,15 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+// Ensure all projects can resolve ffmpeg-kit artifacts
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://www.jitpack.io' }
+        maven { url 'https://www.arthenica.com/maven' }
+        // Local vendored AARs
+        flatDir { dirs "$rootDir/app/libs", "$rootDir/libs" }
+    }
+}
