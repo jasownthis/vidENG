@@ -53,6 +53,21 @@ class BookService {
         createdAt: new Date()
       }
     }
+    ,
+    {
+      id: 'book_ext_001',
+      title: 'The Scholarship Jacket',
+      description: 'A short story for extensive reading practice.',
+      coverUrl: '',
+      pages: [
+        { pageNumber: 1, imageUrl: '' },
+        { pageNumber: 2, imageUrl: '' },
+      ],
+      gradeLevel: 5,
+      category: 'extensive',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }
   ];
 
   // Get all books for a specific grade and category

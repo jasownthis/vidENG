@@ -150,7 +150,7 @@ const BookListScreen: React.FC<BookListScreenProps> = ({
   const categoryIcon = category === 'intensive' ? '📚' : '🚀';
   const categoryDescription = category === 'intensive' 
     ? 'Read carefully with audio recording. Take your time to understand every detail.'
-    : 'Read faster with time challenges. Build reading fluency and speed.';
+    : 'Read faster with time challenges. Build reading fluency and speed. (Temporarily unlocked for testing)';
 
   if (loading) {
     return (

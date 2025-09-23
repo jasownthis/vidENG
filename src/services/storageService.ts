@@ -245,6 +245,24 @@ class StorageService {
   }
 
   /**
+   * Delete all audio files for a user's book folder
+   */
+  async deleteAllUserBookAudio(userId: string, bookId: string, gradeLevel: number): Promise<void> {
+    try {
+      const basePath = this.getAudioPath(userId, bookId, gradeLevel);
+      const folderRef = ref(storage, basePath);
+      const listResult = await listAll(folderRef);
+      // Delete items
+      for (const item of listResult.items) {
+        await deleteObject(item);
+      }
+    } catch (error) {
+      console.error('Error deleting all user book audio:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Delete an audio file from Firebase Storage
    */
   async deleteAudioFile(filePath: string): Promise<void> {

@@ -16,6 +16,7 @@ import { Book, BookProgress, User } from '../types';
 import bookService from '../services/bookService';
 import audioService, { RecordingSession } from '../services/audioService';
 import UploadProgressModal from '../components/UploadProgressModal';
+import storageService from '../services/storageService';
 
 const { width, height } = Dimensions.get('window');
 
@@ -33,7 +34,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   onBookComplete,
 }) => {
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages] = useState(7); // From our converted PDF
+  const [totalPages] = useState(7); // default for intensive mock (will override per book)
   const [progress, setProgress] = useState<BookProgress | null>(null);
   const [startTime, setStartTime] = useState<Date>(new Date());
   const [imageLoading, setImageLoading] = useState(true);
@@ -44,6 +45,11 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [localAudioPath, setLocalAudioPath] = useState<string | null>(null);
   const [recordingsByPage, setRecordingsByPage] = useState<{ [page: number]: string[] }>({});
+  const [pageTime, setPageTime] = useState(0); // UI display of current page time
+  const [timersByPage, setTimersByPage] = useState<{ [page: number]: number }>({}); // session stopwatch per page
+  const [overTimeCount, setOverTimeCount] = useState(0); // extensive only
+  const [overtimeTriggered, setOvertimeTriggered] = useState(false);
+  const [recordingStopped, setRecordingStopped] = useState(false); // intensive cap reached
 
   // Page images mapping - using the converted PDF images
   // Using a more reliable approach to avoid caching issues
@@ -74,7 +80,17 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
     };
   }, []);
 
-  // Handle back button - prevent closing during upload
+  const handleBackPress = async () => {
+    try {
+      await stopCurrentRecording();
+    } catch {}
+    try {
+      await finalizePageTime(currentPage);
+    } catch {}
+    onBack();
+  };
+
+  // Back handling: finalize current page time before exiting (unless uploading)
   useEffect(() => {
     const backAction = () => {
       if (isUploading) {
@@ -85,67 +101,130 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         );
         return true; // Prevent back action
       }
-      return false; // Allow back action
+      // Finalize time then exit
+      (async () => {
+        await handleBackPress();
+      })();
+      return true; // We handled it
     };
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
     return () => backHandler.remove();
-  }, [isUploading]);
+  }, [isUploading, currentPage, onBack]);
 
-  // Update recording session state periodically
+  // Update recording session state and per-page stopwatch periodically
   useEffect(() => {
     const interval = setInterval(() => {
       const session = audioService.getCurrentSession();
       setRecordingSession(session);
+      // tick the current page stopwatch and reflect in pageTime
+      setTimersByPage(prev => {
+        const current = prev[currentPage] ?? 0;
+        const next = current + 1;
+        const updated = { ...prev, [currentPage]: next };
+        setPageTime(next);
+        return updated;
+      });
+      // Intensive: stop/ignore recording after 10 min
+      if (book.category === 'intensive') {
+        const recorded = session?.duration ?? 0;
+        if (recorded >= 600 && session?.isRecording) {
+          // Stop recording but keep reading
+          audioService.stopRecording().catch(() => {});
+          setRecordingStopped(true);
+        }
+      }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [currentPage, book.category]);
+
+  // Handle extensive overtime off the per-page stopwatch
+  useEffect(() => {
+    if (book.category === 'extensive') {
+      const current = timersByPage[currentPage] ?? 0;
+      if (!overtimeTriggered && current >= 420) {
+        setOverTimeCount(prev => prev + 1);
+        setOvertimeTriggered(true);
+        const total = book.pages?.length || totalPages;
+        if (total <= 2) {
+          handleExtensiveReset();
+        }
+      }
+    }
+  }, [timersByPage, currentPage, book.category, overtimeTriggered]);
 
   const loadProgress = async () => {
     try {
       const userProgress = await bookService.getBookProgress(user.id, book.id);
       if (userProgress) {
         setProgress(userProgress);
-        setCurrentPage(userProgress.currentPage);
+        const cp = userProgress.currentPage;
+        setCurrentPage(cp);
+        const saved = userProgress.pageTimers?.[cp]?.totalTime || 0;
+        setTimersByPage(prev => ({ ...prev, [cp]: saved }));
+        setPageTime(saved);
+        setOvertimeTriggered(saved >= 420);
       }
     } catch (error) {
       console.error('Error loading progress:', error);
     }
   };
 
-  const updateProgress = async (page: number) => {
+  // Finalize time on a specific page by saving absolute stopwatch value
+  const finalizePageTime = async (page: number): Promise<BookProgress> => {
     try {
       const updatedProgress: BookProgress = {
         bookId: book.id,
         userId: user.id,
         currentPage: page,
-        totalPages: totalPages,
+        totalPages: book.pages?.length || totalPages,
         isCompleted: false,
         isSubmitted: false,
         startedAt: progress?.startedAt || new Date(),
         pageTimers: progress?.pageTimers || {},
         penaltyCount: progress?.penaltyCount || 0,
+        exceedanceCount: progress?.exceedanceCount || 0,
       };
 
-      // Update page timer
       const pageKey = page.toString();
-      const currentTime = new Date();
-      const timeSpent = Math.floor((currentTime.getTime() - startTime.getTime()) / 1000);
-      
+      const absolute = timersByPage[page] ?? 0;
+
       updatedProgress.pageTimers[pageKey] = {
         pageNumber: page,
         startTime: startTime,
-        totalTime: (updatedProgress.pageTimers[pageKey]?.totalTime || 0) + timeSpent,
-        exceedanceCount: 0,
+        totalTime: absolute,
+        exceedanceCount: updatedProgress.pageTimers[pageKey]?.exceedanceCount || 0,
         isCompleted: true,
       };
 
       await bookService.updateBookProgress(updatedProgress);
       setProgress(updatedProgress);
-      setStartTime(new Date()); // Reset timer for next page
+      setStartTime(new Date());
+      return updatedProgress;
     } catch (error) {
       console.error('Error updating progress:', error);
+      return progress as BookProgress;
+    }
+  };
+
+  // Extensive reset: close book, delete audio, restart from first page
+  const handleExtensiveReset = async () => {
+    try {
+      await audioService.stopRecording();
+      await storageService.deleteAllUserBookAudio(user.id, book.id, user.grade);
+      Alert.alert(
+        'Time limit exceeded',
+        'You exceeded the 7-minute limit. Your session is reset to the first page.',
+        [{ text: 'OK', onPress: () => {
+          setCurrentPage(1);
+          setPageTime(0);
+          setRecordingsByPage({});
+          startRecordingForPage(1);
+        }}]
+      );
+    } catch (e) {
+      console.error('Error resetting extensive session:', e);
     }
   };
 
@@ -166,7 +245,6 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       const filePath = await audioService.stopRecording();
       setLocalAudioPath(filePath);
       if (filePath) {
-        // Append the recording path for the current page (support multiple segments per page)
         setRecordingsByPage(prev => {
           const existing = prev[currentPage] || [];
           return { ...prev, [currentPage]: [...existing, filePath] };
@@ -181,47 +259,53 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
 
   const handlePreviousPage = async () => {
     if (currentPage > 1) {
-      // Stop current recording and start new one for previous page
       await stopCurrentRecording();
-      
+      const newProgress = await finalizePageTime(currentPage);
+
       const newPage = currentPage - 1;
       setImageLoading(true);
       setCurrentPage(newPage);
-      updateProgress(newPage);
-      
-      // Start recording for the new page
+      const saved = (newProgress?.pageTimers?.[newPage]?.totalTime) || (timersByPage[newPage] ?? 0);
+      setTimersByPage(prev => ({ ...prev, [newPage]: saved }));
+      setPageTime(saved);
+      setOvertimeTriggered(saved >= 420);
+
       await startRecordingForPage(newPage);
     }
   };
 
   const handleNextPage = async () => {
-    if (currentPage < totalPages) {
-      // Stop current recording and start new one for next page
+    const total = book.pages?.length || totalPages;
+    const currentSeconds = timersByPage[currentPage] ?? 0;
+    if (currentSeconds < 120) {
+      Alert.alert('Please read a bit longer', 'Minimum 2 minutes per page before moving next.');
+      return;
+    }
+    if (currentPage < total) {
       await stopCurrentRecording();
-      
+      const newProgress = await finalizePageTime(currentPage);
+
       const newPage = currentPage + 1;
       setImageLoading(true);
       setCurrentPage(newPage);
-      updateProgress(newPage);
-      
-      // Start recording for the new page
+      const saved = (newProgress?.pageTimers?.[newPage]?.totalTime) || (timersByPage[newPage] ?? 0);
+      setTimersByPage(prev => ({ ...prev, [newPage]: saved }));
+      setPageTime(saved);
+      setOvertimeTriggered(saved >= 420);
+
       await startRecordingForPage(newPage);
     }
   };
 
-  const handleSubmitBook = () => {
+  const handleSubmitBook = async () => {
+    // Ensure current page time is persisted before submitting
+    try { await finalizePageTime(currentPage); } catch {}
     Alert.alert(
       'Submit Book',
       'This will save your audio recording and submit the book. You can then take the quiz.',
       [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Submit & Save Audio',
-          onPress: handleMandatoryUpload,
-        },
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Submit & Save Audio', onPress: handleMandatoryUpload },
       ]
     );
   };
@@ -230,11 +314,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
     try {
       setIsUploading(true);
       setUploadProgress(0);
-
-      // Step 1: Stop current recording
       const currentFilePath = await stopCurrentRecording();
-
-      // Build a local copy including the just recorded segment
       const localMap: { [page: number]: string[] } = { ...recordingsByPage };
       if (currentFilePath) {
         const existing = localMap[currentPage] || [];
@@ -242,23 +322,15 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           localMap[currentPage] = [...existing, currentFilePath];
         }
       }
-
-      // Build list of pages to upload (all recorded pages)
-      const pagesToUpload = Object.keys(localMap)
-        .map(p => parseInt(p, 10))
-        .sort((a, b) => a - b);
-
+      const pagesToUpload = Object.keys(localMap).map(p => parseInt(p, 10)).sort((a, b) => a - b);
       if (pagesToUpload.length === 0) {
         Alert.alert('Error', 'No audio recording found to save.');
         setIsUploading(false);
         return;
       }
-
-      // Flatten total segments count for progress
       let totalSegments = 0;
       pagesToUpload.forEach(p => { totalSegments += (localMap[p] || []).length; });
       if (totalSegments === 0) totalSegments = 1;
-
       let uploadedSegments = 0;
       for (let i = 0; i < pagesToUpload.length; i++) {
         const pageNum = pagesToUpload[i];
@@ -270,7 +342,6 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
             const weighted = baseProgress + Math.floor((p / 100) * (100 / totalSegments));
             setUploadProgress(Math.min(99, weighted));
           };
-
           const result = await audioService.uploadSegment(
             segmentPath,
             user.id,
@@ -286,77 +357,53 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         }
       }
       setUploadProgress(100);
-
-      // Step 3: Update book progress as submitted
       await bookService.submitBook(user.id, book.id);
-
-      // Step 4: Success!
       setIsUploading(false);
       setRecordingsByPage({});
-      Alert.alert(
-        'Success! 🎉',
-        'Your audio has been saved and book submitted! You can now take the quiz.',
-        [{ text: 'Continue', onPress: onBookComplete }]
-      );
-
+      Alert.alert('Success! 🎉', 'Your audio has been saved and book submitted! You can now take the quiz.', [{ text: 'Continue', onPress: onBookComplete }]);
     } catch (error) {
       console.error('Error in mandatory upload:', error);
       setIsUploading(false);
-      
-      Alert.alert(
-        'Upload Failed',
-        error instanceof Error ? error.message : 'Failed to save audio. Please check your internet connection and try again.',
-        [{ text: 'OK' }]
-      );
+      Alert.alert('Upload Failed', error instanceof Error ? error.message : 'Failed to save audio. Please check your internet connection and try again.', [{ text: 'OK' }]);
     }
   };
 
-  const handleImageLoad = () => {
-    setImageLoading(false);
-  };
-
-  const handleImageError = () => {
-    setImageLoading(false);
-    Alert.alert('Error', 'Failed to load page image');
-  };
+  const handleImageLoad = () => { setImageLoading(false); };
+  const handleImageError = () => { setImageLoading(false); Alert.alert('Error', 'Failed to load page image'); };
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
-      
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={onBack}>
           <Text style={styles.backButtonText}>← Back</Text>
         </TouchableOpacity>
-        
         <View style={styles.headerCenter}>
           <Text style={styles.bookTitle} numberOfLines={1}>{book.title}</Text>
-          <Text style={styles.pageInfo}>
-            Page {currentPage} of {totalPages}
-          </Text>
+          <Text style={styles.pageInfo}>Page {currentPage} of {totalPages}</Text>
         </View>
-        
         <View style={styles.headerRight}>
-          {/* Recording Status Indicator */}
           {recordingSession?.isRecording && (
             <View style={styles.recordingIndicator}>
               <View style={styles.recordingDot} />
               <Text style={styles.recordingText}>
-                {Math.floor(recordingSession.duration / 60)}:{(recordingSession.duration % 60).toString().padStart(2, '0')}
+                {Math.floor((timersByPage[currentPage] ?? 0) / 60)}:{((timersByPage[currentPage] ?? 0) % 60).toString().padStart(2, '0')}
               </Text>
             </View>
           )}
-          
-          <TouchableOpacity 
-            style={[styles.submitButton, isUploading && styles.disabledButton]} 
-            onPress={handleSubmitBook}
-            disabled={isUploading}
-          >
+          <TouchableOpacity style={[styles.submitButton, isUploading && styles.disabledButton]} onPress={handleSubmitBook} disabled={isUploading}>
             <Text style={styles.submitButtonText}>Submit</Text>
           </TouchableOpacity>
         </View>
       </View>
+      {/* Recording stopped banner (intensive cap) */}
+      {recordingStopped && (
+        <View style={{ backgroundColor: '#FFF3CD', borderColor: '#FFEEBA', borderWidth: 1, marginHorizontal: 15, marginTop: 8, borderRadius: 8, padding: 10 }}>
+          <Text style={{ color: '#856404', fontWeight: '600' }}>Recording stopped at 10:00 for this page.</Text>
+          <Text style={{ color: '#856404' }}>You can continue reading, but no more audio will be saved.</Text>
+        </View>
+      )}
 
       {/* Book Page Image */}
       <View style={styles.contentContainer}>
@@ -367,273 +414,83 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
               <Text style={styles.loadingText}>Loading page...</Text>
             </View>
           )}
-          
-          <Image
-            key={`page_${currentPage}`} // Force re-render when page changes
-            source={getPageImageSource(currentPage)}
-            style={styles.pageImage}
-            resizeMode="contain"
-            onLoad={handleImageLoad}
-            onError={handleImageError}
-          />
-          
-          {/* Page number overlay */}
-          <View style={styles.pageNumberOverlay}>
-            <Text style={styles.pageNumberText}>
-              {currentPage}
-            </Text>
-          </View>
+          <Image key={`page_${currentPage}`} source={getPageImageSource(currentPage)} style={styles.pageImage} resizeMode="contain" onLoad={handleImageLoad} onError={handleImageError} />
+          <View style={styles.pageNumberOverlay}><Text style={styles.pageNumberText}>{currentPage}</Text></View>
         </View>
       </View>
-
       {/* Navigation Controls */}
       <View style={styles.navigationContainer}>
-        <TouchableOpacity
-          style={[styles.navButton, currentPage === 1 && styles.disabledButton]}
-          onPress={handlePreviousPage}
-          disabled={currentPage === 1}
-        >
-          <Text style={[styles.navButtonText, currentPage === 1 && styles.disabledText]}>
-            ← Previous
-          </Text>
+        <TouchableOpacity style={[styles.navButton, currentPage === 1 && styles.disabledButton]} onPress={handlePreviousPage} disabled={currentPage === 1}>
+          <Text style={[styles.navButtonText, currentPage === 1 && styles.disabledText]}>← Previous</Text>
         </TouchableOpacity>
-
-        <View style={styles.pageIndicator}>
-          <Text style={styles.pageText}>{currentPage} / {totalPages}</Text>
-        </View>
-
-        <TouchableOpacity
-          style={[styles.navButton, currentPage === totalPages && styles.disabledButton]}
-          onPress={handleNextPage}
-          disabled={currentPage === totalPages}
-        >
-          <Text style={[styles.navButtonText, currentPage === totalPages && styles.disabledText]}>
-            Next →
-          </Text>
-        </TouchableOpacity>
+        <View style={styles.pageIndicator}><Text style={styles.pageText}>{currentPage} / {totalPages}</Text></View>
+        {(() => {
+          const total = (book.pages?.length || totalPages);
+          const currentSeconds = timersByPage[currentPage] ?? 0;
+          const nextDisabled = currentPage === total || currentSeconds < 120;
+          const remaining = Math.max(0, 120 - currentSeconds);
+          return (
+            <View style={{ alignItems: 'flex-end' }}>
+              <TouchableOpacity style={[styles.navButton, nextDisabled && styles.disabledButton]} onPress={handleNextPage} disabled={nextDisabled}>
+                <Text style={[styles.navButtonText, nextDisabled && styles.disabledText]}>Next →</Text>
+              </TouchableOpacity>
+              {currentSeconds < 120 && (<Text style={{ fontSize: 12, color: '#999', marginTop: 4 }}>Need {remaining}s more</Text>)}
+            </View>
+          );
+        })()}
       </View>
-
       {/* Progress Bar */}
       <View style={styles.progressContainer}>
         <View style={styles.progressBar}>
-          <View
-            style={[
-              styles.progressFill,
-              { width: `${(currentPage / totalPages) * 100}%` },
-            ]}
-          />
+          <View style={[styles.progressFill, { width: `${(currentPage / totalPages) * 100}%` }]} />
         </View>
-        <Text style={styles.progressText}>
-          {Math.round((currentPage / totalPages) * 100)}% Complete
-        </Text>
+        <Text style={styles.progressText}>{Math.round((currentPage / totalPages) * 100)}% Complete</Text>
       </View>
-
+      {/* Last-page Complete Button */}
+      {currentPage === (book.pages?.length || totalPages) && (
+        <View style={{ paddingHorizontal: 20, paddingBottom: 20, backgroundColor: '#ffffff' }}>
+          <TouchableOpacity style={[styles.navButton, { alignItems: 'center' }]} onPress={handleSubmitBook} disabled={isUploading}>
+            <Text style={styles.navButtonText}>Complete</Text>
+          </TouchableOpacity>
+        </View>
+      )}
       {/* Upload Progress Modal */}
-      <UploadProgressModal
-        visible={isUploading}
-        progress={uploadProgress}
-        message="Saving your audio recording..."
-        subMessage="Please don't close the app"
-      />
+      <UploadProgressModal visible={isUploading} progress={uploadProgress} message="Saving your audio recording..." subMessage="Please don't close the app" />
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 15,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E0E0E0',
-    backgroundColor: '#ffffff',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-  },
-  backButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  backButtonText: {
-    fontSize: 16,
-    color: '#2E7D32',
-    fontWeight: '500',
-  },
-  headerCenter: {
-    flex: 1,
-    alignItems: 'center',
-    marginHorizontal: 10,
-  },
-  bookTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  pageInfo: {
-    fontSize: 12,
-    color: '#666',
-    marginTop: 2,
-  },
-  headerRight: {
-    alignItems: 'center',
-    flexDirection: 'row',
-  },
-  recordingIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FF3030',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginRight: 10,
-  },
-  recordingDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#ffffff',
-    marginRight: 6,
-  },
-  recordingText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  submitButton: {
-    backgroundColor: '#2E7D32',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 6,
-  },
-  disabledButton: {
-    backgroundColor: '#E0E0E0',
-  },
-  submitButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  contentContainer: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 5,
-  },
-  pageContainer: {
-    position: 'relative',
-    width: width - 10, // Almost full width
-    height: height * 0.75, // Fixed height - 75% of screen
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    overflow: 'hidden',
-  },
-  pageImage: {
-    width: '100%',
-    height: '100%', // Fill the entire container
-  },
-  loadingContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    zIndex: 1,
-  },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: '#666',
-  },
-  pageNumberOverlay: {
-    position: 'absolute',
-    bottom: 10,
-    right: 10,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    borderRadius: 12,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  pageNumberText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  navigationContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    backgroundColor: '#ffffff',
-    borderTopWidth: 1,
-    borderTopColor: '#E0E0E0',
-  },
-  navButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    backgroundColor: '#2E7D32',
-    borderRadius: 8,
-  },
-  disabledButton: {
-    backgroundColor: '#E0E0E0',
-  },
-  navButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  disabledText: {
-    color: '#999',
-  },
-  pageIndicator: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: '#F5F5F5',
-    borderRadius: 8,
-  },
-  pageText: {
-    fontSize: 16,
-    color: '#333',
-    fontWeight: '500',
-  },
-  progressContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 15,
-    backgroundColor: '#ffffff',
-  },
-  progressBar: {
-    height: 4,
-    backgroundColor: '#E0E0E0',
-    borderRadius: 2,
-    marginBottom: 8,
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#4CAF50',
-    borderRadius: 2,
-  },
-  progressText: {
-    fontSize: 12,
-    color: '#666',
-    textAlign: 'center',
-  },
+  container: { flex: 1, backgroundColor: '#ffffff' },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#E0E0E0', backgroundColor: '#ffffff', elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 2 },
+  backButton: { paddingVertical: 8, paddingHorizontal: 12 },
+  backButtonText: { fontSize: 16, color: '#2E7D32', fontWeight: '500' },
+  headerCenter: { flex: 1, alignItems: 'center', marginHorizontal: 10 },
+  bookTitle: { fontSize: 16, fontWeight: 'bold', color: '#333' },
+  pageInfo: { fontSize: 12, color: '#666', marginTop: 2 },
+  headerRight: { alignItems: 'center', flexDirection: 'row' },
+  recordingIndicator: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FF3030', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, marginRight: 10 },
+  recordingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#ffffff', marginRight: 6 },
+  recordingText: { color: '#ffffff', fontSize: 12, fontWeight: 'bold' },
+  submitButton: { backgroundColor: '#2E7D32', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 6 },
+  disabledButton: { backgroundColor: '#E0E0E0' },
+  submitButtonText: { color: '#ffffff', fontSize: 14, fontWeight: 'bold' },
+  contentContainer: { flex: 1, backgroundColor: '#f5f5f5', justifyContent: 'center', alignItems: 'center', padding: 5 },
+  pageContainer: { position: 'relative', width: width - 10, height: height * 0.75, backgroundColor: '#ffffff', borderRadius: 8, elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, overflow: 'hidden' },
+  pageImage: { width: '100%', height: '100%' },
+  loadingContainer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.9)', zIndex: 1 },
+  loadingText: { marginTop: 10, fontSize: 16, color: '#666' },
+  pageNumberOverlay: { position: 'absolute', bottom: 10, right: 10, backgroundColor: 'rgba(0, 0, 0, 0.7)', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4 },
+  pageNumberText: { color: '#ffffff', fontSize: 12, fontWeight: 'bold' },
+  navigationContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 15, backgroundColor: '#ffffff', borderTopWidth: 1, borderTopColor: '#E0E0E0' },
+  navButton: { paddingVertical: 10, paddingHorizontal: 20, backgroundColor: '#2E7D32', borderRadius: 8 },
+  disabledText: { color: '#999' },
+  pageIndicator: { paddingHorizontal: 20, paddingVertical: 10, backgroundColor: '#F5F5F5', borderRadius: 8 },
+  pageText: { fontSize: 16, color: '#333', fontWeight: '500' },
+  progressContainer: { paddingHorizontal: 20, paddingBottom: 15, backgroundColor: '#ffffff' },
+  progressBar: { height: 4, backgroundColor: '#E0E0E0', borderRadius: 2, marginBottom: 8 },
+  progressFill: { height: '100%', backgroundColor: '#4CAF50', borderRadius: 2 },
+  progressText: { fontSize: 12, color: '#666', textAlign: 'center' },
 });
 
 export default ImageBookReaderScreen;
