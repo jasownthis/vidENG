@@ -34,7 +34,14 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   onBookComplete,
 }) => {
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages] = useState(7); // default for intensive mock (will override per book)
+  // Total pages derived from book.pages or saved progress; fallback to 7 for local mock
+  const getTotalPages = (): number => {
+    const fromBook = book.pages?.length;
+    if (fromBook && fromBook > 0) return fromBook;
+    const fromProgress = progress?.totalPages;
+    if (fromProgress && fromProgress > 0) return fromProgress;
+    return 7;
+  };
   const [progress, setProgress] = useState<BookProgress | null>(null);
   const [startTime, setStartTime] = useState<Date>(new Date());
   const [imageLoading, setImageLoading] = useState(true);
@@ -53,9 +60,8 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [recordedByPage, setRecordedByPage] = useState<{ [page: number]: number }>({}); // cumulative recorded seconds per page
   const [cappedByPage, setCappedByPage] = useState<{ [page: number]: boolean }>({}); // page permanently capped at 10m
 
-  // Page images mapping - using the converted PDF images
-  // Using a more reliable approach to avoid caching issues
-  const pageImages = {
+  // Prefer cloud URLs when available; fallback to bundled assets
+  const localPageImages = {
     1: require('../../assets/books/pages/book_002_page-1.png'),
     2: require('../../assets/books/pages/book_002_page-2.png'),
     3: require('../../assets/books/pages/book_002_page-3.png'),
@@ -63,10 +69,15 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
     5: require('../../assets/books/pages/book_002_page-5.png'),
     6: require('../../assets/books/pages/book_002_page-6.png'),
     7: require('../../assets/books/pages/book_002_page-7.png'),
-  };
+  } as const;
 
   const getPageImageSource = (pageNumber: number) => {
-    return pageImages[pageNumber as keyof typeof pageImages] || pageImages[1];
+    const pg = book.pages?.find(p => p.pageNumber === pageNumber);
+    const uri = pg?.imageUrl;
+    if (uri && (uri.startsWith('http://') || uri.startsWith('https://'))) {
+      return { uri } as any;
+    }
+    return (localPageImages as any)[pageNumber] || (localPageImages as any)[1];
   };
 
   useEffect(() => {
@@ -168,7 +179,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       if (!overtimeTriggered && current >= 420) {
         setOverTimeCount(prev => prev + 1);
         setOvertimeTriggered(true);
-        const total = book.pages?.length || totalPages;
+        const total = getTotalPages();
         if (total <= 2) {
           handleExtensiveReset();
         }
@@ -224,7 +235,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         bookId: book.id,
         userId: user.id,
         currentPage: page,
-        totalPages: book.pages?.length || totalPages,
+        totalPages: getTotalPages(),
         isCompleted: false,
         isSubmitted: false,
         startedAt: progress?.startedAt || new Date(),
@@ -352,7 +363,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   };
 
   const handleNextPage = async () => {
-    const total = book.pages?.length || totalPages;
+    const total = getTotalPages();
     const currentSeconds = timersByPage[currentPage] ?? 0;
     if (currentSeconds < 120) {
       Alert.alert('Please read a bit longer', 'Minimum 2 minutes per page before moving next.');
@@ -465,7 +476,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         bookId: book.id,
         userId: user.id,
         currentPage: page,
-        totalPages: book.pages?.length || totalPages,
+        totalPages: getTotalPages(),
         isCompleted: progress?.isCompleted || false,
         isSubmitted: progress?.isSubmitted || false,
         startedAt: progress?.startedAt || new Date(),
@@ -504,7 +515,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.bookTitle} numberOfLines={1}>{book.title}</Text>
-          <Text style={styles.pageInfo}>Page {currentPage} of {totalPages}</Text>
+          <Text style={styles.pageInfo}>Page {currentPage} of {getTotalPages()}</Text>
         </View>
         <View style={styles.headerRight}>
           {recordingSession?.isRecording && (
@@ -546,9 +557,9 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         <TouchableOpacity style={[styles.navButton, currentPage === 1 && styles.disabledButton]} onPress={handlePreviousPage} disabled={currentPage === 1}>
           <Text style={[styles.navButtonText, currentPage === 1 && styles.disabledText]}>← Previous</Text>
         </TouchableOpacity>
-        <View style={styles.pageIndicator}><Text style={styles.pageText}>{currentPage} / {totalPages}</Text></View>
+        <View style={styles.pageIndicator}><Text style={styles.pageText}>{currentPage} / {getTotalPages()}</Text></View>
         {(() => {
-          const total = (book.pages?.length || totalPages);
+          const total = getTotalPages();
           const currentSeconds = timersByPage[currentPage] ?? 0;
           const remaining = Math.max(0, 120 - currentSeconds);
           const isLastPage = currentPage === total;
@@ -578,9 +589,9 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       {/* Progress Bar */}
       <View style={styles.progressContainer}>
         <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${(currentPage / totalPages) * 100}%` }]} />
+          <View style={[styles.progressFill, { width: `${(currentPage / getTotalPages()) * 100}%` }]} />
         </View>
-        <Text style={styles.progressText}>{Math.round((currentPage / totalPages) * 100)}% Complete</Text>
+        <Text style={styles.progressText}>{Math.round((currentPage / getTotalPages()) * 100)}% Complete</Text>
       </View>
       {/* Last-page Complete Button moved to navigation; removed duplicate here */}
       {/* Upload Progress Modal */}

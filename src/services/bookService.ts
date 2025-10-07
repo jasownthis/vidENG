@@ -1,6 +1,7 @@
-import { Book, BookProgress } from '../types';
+import { Book, BookProgress, BookPage } from '../types';
 import { collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import storageService from './storageService';
 
 class BookService {
   // Mock books data (later will come from Firebase/Admin)
@@ -73,21 +74,67 @@ class BookService {
   // Get all books for a specific grade and category
   async getBooks(gradeLevel?: number, category?: 'intensive' | 'extensive'): Promise<Book[]> {
     try {
-      // For now, return mock books filtered by criteria
-      let filteredBooks = this.mockBooks;
+      // First try Firestore-backed books (grade-scoped if gradeLevel provided); fallback to mock if none.
+      const gradeScoped = gradeLevel ? collection(db, 'grades', String(gradeLevel), 'books') : collection(db, 'books');
+      const snapshots = await getDocs(gradeScoped as any);
+      const cloudBooks: Book[] = [] as any;
+      snapshots.forEach((d) => {
+        const data = d.data() as any;
+        if (!data) return;
+        const b: Book = {
+          id: d.id,
+          title: data.title,
+          description: data.description,
+          coverUrl: data.coverPath || '',
+          pages: (data.pagePaths || []).map((p: string, idx: number): BookPage => ({ pageNumber: idx + 1, imageUrl: p })),
+          gradeLevel: data.gradeLevel,
+          category: data.category,
+          createdAt: data.createdAt ? new Date(data.createdAt.seconds ? data.createdAt.seconds * 1000 : data.createdAt) : new Date(),
+          updatedAt: data.updatedAt ? new Date(data.updatedAt.seconds ? data.updatedAt.seconds * 1000 : data.updatedAt) : new Date(),
+        };
+        cloudBooks.push(b);
+      });
+
+      let books = cloudBooks.length > 0 ? cloudBooks : this.mockBooks;
 
       if (gradeLevel) {
-        filteredBooks = filteredBooks.filter(book => book.gradeLevel === gradeLevel);
+        books = books.filter(book => book.gradeLevel === gradeLevel);
       }
 
       if (category) {
-        filteredBooks = filteredBooks.filter(book => book.category === category);
+        books = books.filter(book => book.category === category);
       }
 
-      return filteredBooks;
+      // If cloud books, resolve cover/page paths to download URLs lazily
+      const resolved: Book[] = [];
+      for (const b of books) {
+        if (b.coverUrl && !b.coverUrl.startsWith('http')) {
+          try { b.coverUrl = await storageService.getDownloadUrlForPath(b.coverUrl); } catch {}
+        }
+        const pages: BookPage[] = [];
+        for (const pg of b.pages) {
+          if (pg.imageUrl && !pg.imageUrl.startsWith('http')) {
+            try {
+              const url = await storageService.getDownloadUrlForPath(pg.imageUrl);
+              pages.push({ ...pg, imageUrl: url });
+            } catch {
+              pages.push(pg);
+            }
+          } else {
+            pages.push(pg);
+          }
+        }
+        resolved.push({ ...b, pages });
+      }
+
+      return resolved;
     } catch (error) {
       console.error('Error fetching books:', error);
-      return [];
+      // Fallback to mock
+      let filteredBooks = this.mockBooks;
+      if (gradeLevel) filteredBooks = filteredBooks.filter(b => b.gradeLevel === gradeLevel);
+      if (category) filteredBooks = filteredBooks.filter(b => b.category === category);
+      return filteredBooks;
     }
   }
 
@@ -178,6 +225,28 @@ class BookService {
       return progress;
     } catch (error) {
       console.error('Error starting book reading:', error);
+      throw error;
+    }
+  }
+
+  // Start reading using an already-loaded Book (avoids re-fetch issues for Firestore)
+  async startReadingWithBook(userId: string, book: Book): Promise<BookProgress> {
+    try {
+      const progress: BookProgress = {
+        bookId: book.id,
+        userId,
+        currentPage: 1,
+        totalPages: book.pages.length || 10,
+        isCompleted: false,
+        isSubmitted: false,
+        startedAt: new Date(),
+        pageTimers: {},
+        penaltyCount: 0,
+      };
+      await this.updateBookProgress(progress);
+      return progress;
+    } catch (error) {
+      console.error('Error starting book reading (with book):', error);
       throw error;
     }
   }

@@ -94,8 +94,8 @@ const BookListScreen: React.FC<BookListScreenProps> = ({
       let progress = getBookProgress(book.id);
       
       if (!progress) {
-        // Start reading for the first time
-        progress = await bookService.startReading(user.id, book.id);
+        // Start reading for the first time using the loaded Book
+        progress = await bookService.startReadingWithBook(user.id, book);
         setUserProgress(prev => [...prev, progress!]);
       }
       

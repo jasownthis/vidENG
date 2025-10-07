@@ -61,21 +61,9 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
     try {
       setLoading(true);
       
-      // Load user's progress for this book
+      // Load user's progress for this book (no demo override)
       const userProgress = await bookService.getBookProgress(user.id, book.id);
-      
-      // For demo purposes, simulate a completed book to show quiz functionality
-      if (userProgress) {
-        // If user has progress, mark it as submitted for demo
-        const demoProgress = {
-          ...userProgress,
-          isSubmitted: true,
-          currentPage: userProgress.totalPages, // Set to last page
-        };
-        setProgress(demoProgress);
-      } else {
-        setProgress(userProgress);
-      }
+      setProgress(userProgress);
       
       // Load user's audio recordings for this book from Firebase Storage
       const recordings = await storageService.listUserBookAudio(

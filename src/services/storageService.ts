@@ -284,6 +284,14 @@ class StorageService {
   }
 
   /**
+   * Resolve a Firebase Storage path to a download URL
+   */
+  async getDownloadUrlForPath(filePath: string): Promise<string> {
+    const r = ref(storage, filePath);
+    return await getDownloadURL(r);
+  }
+
+  /**
    * Generate a unique filename for new recordings
    */
   generateAudioFileName(pageNumber: number, timestamp?: number): string {

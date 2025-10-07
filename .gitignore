@@ -113,3 +113,6 @@ firebase-debug.log
 
 # Atom
 .atom/
+
+#secrets 
+videng-reading-app-firebase-adminsdk-fbsvc-6a6f295e73.json
