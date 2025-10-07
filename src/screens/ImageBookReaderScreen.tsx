@@ -49,7 +49,9 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [timersByPage, setTimersByPage] = useState<{ [page: number]: number }>({}); // session stopwatch per page
   const [overTimeCount, setOverTimeCount] = useState(0); // extensive only
   const [overtimeTriggered, setOvertimeTriggered] = useState(false);
-  const [recordingStopped, setRecordingStopped] = useState(false); // intensive cap reached
+  const [recordingStopped, setRecordingStopped] = useState(false); // intensive cap reached (immediate)
+  const [recordedByPage, setRecordedByPage] = useState<{ [page: number]: number }>({}); // cumulative recorded seconds per page
+  const [cappedByPage, setCappedByPage] = useState<{ [page: number]: boolean }>({}); // page permanently capped at 10m
 
   // Page images mapping - using the converted PDF images
   // Using a more reliable approach to avoid caching issues
@@ -127,17 +129,37 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       });
       // Intensive: stop/ignore recording after 10 min
       if (book.category === 'intensive') {
-        const recorded = session?.duration ?? 0;
-        if (recorded >= 600 && session?.isRecording) {
-          // Stop recording but keep reading
+        const isCapped = cappedByPage[currentPage] === true;
+        // If capped, ensure we are not recording
+        if (isCapped && session?.isRecording) {
           audioService.stopRecording().catch(() => {});
-          setRecordingStopped(true);
+        }
+        if (!isCapped && session?.isRecording) {
+          const currentRecorded = recordedByPage[currentPage] ?? 0;
+          if (currentRecorded < 600) {
+            const nextRecorded = Math.min(600, currentRecorded + 1);
+            if (nextRecorded !== currentRecorded) {
+              setRecordedByPage(prev => ({ ...prev, [currentPage]: nextRecorded }));
+            }
+            if (nextRecorded >= 600) {
+              // Cap reached: stop recording, mark capped, persist
+              audioService.stopRecording().catch(() => {});
+              setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
+              setRecordingStopped(true);
+              // Persist cap and recorded seconds
+              (async () => {
+                try {
+                  await persistCapForPage(currentPage, nextRecorded);
+                } catch {}
+              })();
+            }
+          }
         }
       }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [currentPage, book.category]);
+  }, [currentPage, book.category, recordedByPage, cappedByPage]);
 
   // Handle extensive overtime off the per-page stopwatch
   useEffect(() => {
@@ -161,10 +183,34 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         setProgress(userProgress);
         const cp = userProgress.currentPage;
         setCurrentPage(cp);
-        const saved = userProgress.pageTimers?.[cp]?.totalTime || 0;
-        setTimersByPage(prev => ({ ...prev, [cp]: saved }));
+        // Seed timers and flags for all known pages
+        const seededTimers: { [page: number]: number } = {};
+        const seededRecorded: { [page: number]: number } = {};
+        const seededCapped: { [page: number]: boolean } = {};
+        const timersMap = userProgress.pageTimers || {} as any;
+        Object.keys(timersMap).forEach((k) => {
+          const p = parseInt(k, 10);
+          const t = timersMap[k];
+          if (!isNaN(p) && t) {
+            seededTimers[p] = t.totalTime || 0;
+            if (typeof t.recordedTotalSeconds === 'number') {
+              seededRecorded[p] = t.recordedTotalSeconds;
+            }
+            const reachedCap = t.isCapped === true
+              || (typeof t.recordedTotalSeconds === 'number' && t.recordedTotalSeconds >= 600)
+              || ((t.totalTime || 0) >= 600);
+            if (reachedCap) {
+              seededCapped[p] = true;
+            }
+          }
+        });
+        const saved = seededTimers[cp] || 0;
+        setTimersByPage(prev => ({ ...prev, ...seededTimers }));
+        setRecordedByPage(prev => ({ ...prev, ...seededRecorded }));
+        setCappedByPage(prev => ({ ...prev, ...seededCapped }));
         setPageTime(saved);
         setOvertimeTriggered(saved >= 420);
+        setRecordingStopped(seededCapped[cp] === true);
       }
     } catch (error) {
       console.error('Error loading progress:', error);
@@ -231,6 +277,27 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   // Audio recording functions
   const startRecordingForPage = async (pageNumber: number) => {
     try {
+      // If this page is capped in intensive mode, do not record
+      if (book.category === 'intensive') {
+        const pageKey = pageNumber.toString();
+        const pg: any = (progress?.pageTimers as any)?.[pageKey];
+        const explicitCap = cappedByPage[pageNumber] === true || pg?.isCapped === true;
+        const recSecs = typeof pg?.recordedTotalSeconds === 'number' ? pg.recordedTotalSeconds : undefined;
+        const legacyOver = (pg?.totalTime || 0) >= 600;
+        const effectiveCap = explicitCap || (typeof recSecs === 'number' && recSecs >= 600) || legacyOver;
+        if (effectiveCap) {
+          setRecordingStopped(true);
+          setCappedByPage(prev => ({ ...prev, [pageNumber]: true }));
+          if (!pg?.isCapped) {
+            (async () => {
+              try {
+                await persistCapForPage(pageNumber, Math.max(recSecs ?? 0, 600));
+              } catch {}
+            })();
+          }
+          return;
+        }
+      }
       const success = await audioService.startRecording(pageNumber);
       if (!success) {
         Alert.alert('Recording Error', 'Could not start recording for this page.');
@@ -269,6 +336,16 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       setTimersByPage(prev => ({ ...prev, [newPage]: saved }));
       setPageTime(saved);
       setOvertimeTriggered(saved >= 420);
+      const recordedSaved = (newProgress?.pageTimers?.[newPage]?.recordedTotalSeconds)
+        || (recordedByPage[newPage] ?? 0)
+        || ((newProgress?.pageTimers?.[newPage]?.totalTime || 0) >= 600 ? 600 : 0);
+      setRecordedByPage(prev => ({ ...prev, [newPage]: recordedSaved }));
+      const isCapped = (newProgress?.pageTimers?.[newPage]?.isCapped === true)
+        || (cappedByPage[newPage] === true)
+        || ((newProgress?.pageTimers?.[newPage]?.recordedTotalSeconds || 0) >= 600)
+        || ((newProgress?.pageTimers?.[newPage]?.totalTime || 0) >= 600);
+      setCappedByPage(prev => ({ ...prev, [newPage]: isCapped }));
+      setRecordingStopped(isCapped);
 
       await startRecordingForPage(newPage);
     }
@@ -292,6 +369,16 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       setTimersByPage(prev => ({ ...prev, [newPage]: saved }));
       setPageTime(saved);
       setOvertimeTriggered(saved >= 420);
+      const recordedSaved = (newProgress?.pageTimers?.[newPage]?.recordedTotalSeconds)
+        || (recordedByPage[newPage] ?? 0)
+        || ((newProgress?.pageTimers?.[newPage]?.totalTime || 0) >= 600 ? 600 : 0);
+      setRecordedByPage(prev => ({ ...prev, [newPage]: recordedSaved }));
+      const isCapped = (newProgress?.pageTimers?.[newPage]?.isCapped === true)
+        || (cappedByPage[newPage] === true)
+        || ((newProgress?.pageTimers?.[newPage]?.recordedTotalSeconds || 0) >= 600)
+        || ((newProgress?.pageTimers?.[newPage]?.totalTime || 0) >= 600);
+      setCappedByPage(prev => ({ ...prev, [newPage]: isCapped }));
+      setRecordingStopped(isCapped);
 
       await startRecordingForPage(newPage);
     }
@@ -371,6 +458,42 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const handleImageLoad = () => { setImageLoading(false); };
   const handleImageError = () => { setImageLoading(false); Alert.alert('Error', 'Failed to load page image'); };
 
+  // Persist cap state and recorded seconds for a page to Firestore
+  const persistCapForPage = async (page: number, recordedSeconds: number) => {
+    try {
+      const updatedProgress: BookProgress = {
+        bookId: book.id,
+        userId: user.id,
+        currentPage: page,
+        totalPages: book.pages?.length || totalPages,
+        isCompleted: progress?.isCompleted || false,
+        isSubmitted: progress?.isSubmitted || false,
+        startedAt: progress?.startedAt || new Date(),
+        pageTimers: progress?.pageTimers || {},
+        penaltyCount: progress?.penaltyCount || 0,
+        exceedanceCount: (progress as any)?.exceedanceCount || 0,
+      } as any;
+
+      const pageKey = page.toString();
+      const absolute = timersByPage[page] ?? progress?.pageTimers?.[pageKey]?.totalTime ?? 0;
+      const prevTimer = updatedProgress.pageTimers[pageKey] as any;
+      updatedProgress.pageTimers[pageKey] = {
+        pageNumber: page,
+        startTime: prevTimer?.startTime || startTime,
+        totalTime: absolute,
+        exceedanceCount: prevTimer?.exceedanceCount || 0,
+        isCompleted: true,
+        recordedTotalSeconds: Math.min(600, recordedSeconds),
+        isCapped: true,
+      } as any;
+
+      await bookService.updateBookProgress(updatedProgress);
+      setProgress(updatedProgress);
+    } catch (error) {
+      console.error('Error persisting cap state:', error);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
@@ -398,10 +521,10 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         </View>
       </View>
       {/* Recording stopped banner (intensive cap) */}
-      {recordingStopped && (
+      {book.category === 'intensive' && (recordingStopped || cappedByPage[currentPage]) && (
         <View style={{ backgroundColor: '#FFF3CD', borderColor: '#FFEEBA', borderWidth: 1, marginHorizontal: 15, marginTop: 8, borderRadius: 8, padding: 10 }}>
-          <Text style={{ color: '#856404', fontWeight: '600' }}>Recording stopped at 10:00 for this page.</Text>
-          <Text style={{ color: '#856404' }}>You can continue reading, but no more audio will be saved.</Text>
+          <Text style={{ color: '#856404', fontWeight: '600' }}>Time limit 10m reached, recording stopped.</Text>
+          <Text style={{ color: '#856404' }}>You can continue reading, but no more audio will be saved on this page.</Text>
         </View>
       )}
 
@@ -427,12 +550,25 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         {(() => {
           const total = (book.pages?.length || totalPages);
           const currentSeconds = timersByPage[currentPage] ?? 0;
-          const nextDisabled = currentPage === total || currentSeconds < 120;
           const remaining = Math.max(0, 120 - currentSeconds);
+          const isLastPage = currentPage === total;
+          if (!isLastPage) {
+            const nextDisabled = currentSeconds < 120;
+            return (
+              <View style={{ alignItems: 'flex-end' }}>
+                <TouchableOpacity style={[styles.navButton, nextDisabled && styles.disabledButton]} onPress={handleNextPage} disabled={nextDisabled}>
+                  <Text style={[styles.navButtonText, nextDisabled && styles.disabledText]}>Next →</Text>
+                </TouchableOpacity>
+                {currentSeconds < 120 && (<Text style={{ fontSize: 12, color: '#999', marginTop: 4 }}>Need {remaining}s more</Text>)}
+              </View>
+            );
+          }
+          // Last page: show Complete instead of Next
+          const completeDisabled = isUploading || currentSeconds < 120;
           return (
             <View style={{ alignItems: 'flex-end' }}>
-              <TouchableOpacity style={[styles.navButton, nextDisabled && styles.disabledButton]} onPress={handleNextPage} disabled={nextDisabled}>
-                <Text style={[styles.navButtonText, nextDisabled && styles.disabledText]}>Next →</Text>
+              <TouchableOpacity style={[styles.navButton, completeDisabled && styles.disabledButton]} onPress={handleSubmitBook} disabled={completeDisabled}>
+                <Text style={[styles.navButtonText, completeDisabled && styles.disabledText]}>Complete</Text>
               </TouchableOpacity>
               {currentSeconds < 120 && (<Text style={{ fontSize: 12, color: '#999', marginTop: 4 }}>Need {remaining}s more</Text>)}
             </View>
@@ -446,14 +582,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         </View>
         <Text style={styles.progressText}>{Math.round((currentPage / totalPages) * 100)}% Complete</Text>
       </View>
-      {/* Last-page Complete Button */}
-      {currentPage === (book.pages?.length || totalPages) && (
-        <View style={{ paddingHorizontal: 20, paddingBottom: 20, backgroundColor: '#ffffff' }}>
-          <TouchableOpacity style={[styles.navButton, { alignItems: 'center' }]} onPress={handleSubmitBook} disabled={isUploading}>
-            <Text style={styles.navButtonText}>Complete</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+      {/* Last-page Complete Button moved to navigation; removed duplicate here */}
       {/* Upload Progress Modal */}
       <UploadProgressModal visible={isUploading} progress={uploadProgress} message="Saving your audio recording..." subMessage="Please don't close the app" />
     </SafeAreaView>

@@ -50,6 +50,10 @@ export interface PageTimer {
   totalTime: number; // in seconds
   exceedanceCount: number;
   isCompleted: boolean;
+  // Total cumulative recorded audio time for this page in seconds (intensive)
+  recordedTotalSeconds?: number;
+  // If true, this page has reached the 10-minute recording cap and cannot record further
+  isCapped?: boolean;
 }
 
 // Audio Types
