@@ -1,5 +1,5 @@
-import { Book, BookProgress, BookPage } from '../types';
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where } from 'firebase/firestore';
+import { Book, BookProgress, BookPage, QNASet, QuizResult, Sticker } from '../types';
+import { collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where, addDoc } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import storageService from './storageService';
 
@@ -146,6 +146,53 @@ class BookService {
     } catch (error) {
       console.error('Error fetching book:', error);
       return null;
+    }
+  }
+
+  // Load quiz set for a book from Firestore: grades/{grade}/books/{bookId}/quiz
+  async getQuizForBook(gradeLevel: number, bookId: string): Promise<QNASet | null> {
+    try {
+      const quizDocRef = doc(db, 'grades', String(gradeLevel), 'books', bookId, 'quiz', 'default');
+      const snap = await getDoc(quizDocRef);
+      if (!snap.exists()) return null;
+      const data = snap.data() as any;
+      const qna: QNASet = {
+        id: 'default',
+        bookId,
+        questions: data.questions || [],
+        passingScore: data.passingScore ?? (data.questions?.length || 0),
+        createdAt: data.createdAt ? new Date(data.createdAt.seconds ? data.createdAt.seconds * 1000 : data.createdAt) : new Date(),
+      };
+      return qna;
+    } catch (e) {
+      console.error('Error loading quiz:', e);
+      return null;
+    }
+  }
+
+  // Save quiz result under users/{userId}/quizResults/{bookId}
+  async saveQuizResult(result: QuizResult): Promise<void> {
+    try {
+      await setDoc(doc(db, 'users', result.userId, 'quizResults', result.bookId), result, { merge: true });
+    } catch (e) {
+      console.error('Error saving quiz result:', e);
+    }
+  }
+
+  // Award a sticker to the user profile
+  async awardSticker(userId: string, sticker: Sticker): Promise<void> {
+    try {
+      const userRef = doc(db, 'users', userId);
+      const existing = await getDoc(userRef);
+      if (!existing.exists()) return;
+      const user = existing.data() as any;
+      const stickers: Sticker[] = Array.isArray(user.stickers) ? user.stickers : [];
+      const already = stickers.find(s => s.id === sticker.id);
+      if (already) return;
+      const updated = [...stickers, { ...sticker, earnedAt: new Date() }];
+      await setDoc(userRef, { stickers: updated }, { merge: true });
+    } catch (e) {
+      console.error('Error awarding sticker:', e);
     }
   }
 

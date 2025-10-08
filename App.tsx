@@ -10,6 +10,7 @@ import SplashScreen from './src/components/SplashScreen';
 import LoginScreen from './src/screens/LoginScreen';
 import GradeSelectionScreen from './src/screens/GradeSelectionScreen';
 import HomeScreen from './src/screens/HomeScreen';
+import ProfileScreen from './src/screens/ProfileScreen';
 import BookListScreen from './src/screens/BookListScreen';
 import BookDetailScreen from './src/screens/BookDetailScreen';
 import ImageBookReaderScreen from './src/screens/ImageBookReaderScreen';
@@ -22,7 +23,7 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showGradeSelection, setShowGradeSelection] = useState(false);
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'bookList' | 'bookDetail' | 'bookReader' | 'quiz'>('home');
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'bookList' | 'bookDetail' | 'bookReader' | 'quiz' | 'profile'>('home');
   const [selectedCategory, setSelectedCategory] = useState<'intensive' | 'extensive'>('intensive');
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
 
@@ -79,8 +80,7 @@ const App: React.FC = () => {
   };
 
   const handleNavigateToProfile = () => {
-    // TODO: Navigate to profile screen
-    console.log('Navigate to Profile');
+    setCurrentScreen('profile');
   };
 
   const handleBookSelect = (book: Book) => {
@@ -205,6 +205,15 @@ const App: React.FC = () => {
         book={selectedBook}
         onBack={handleBackToBookDetail}
         onQuizComplete={handleQuizComplete}
+      />
+    );
+  }
+
+  if (currentScreen === 'profile') {
+    return (
+      <ProfileScreen
+        user={currentUser}
+        onBack={handleBackToHome}
       />
     );
   }

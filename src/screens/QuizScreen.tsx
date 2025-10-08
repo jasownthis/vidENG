@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,10 +9,12 @@ import {
   Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Book, User, Question, QuizResult, UserAnswer } from '../types';
+import { Book, User, Question, QuizResult, UserAnswer, Sticker } from '../types';
 import bookService from '../services/bookService';
+import { Image } from 'react-native';
+const congratsGif = require('../../assets/correct_answer_sticker.png');
 
-const { width } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
 
 interface QuizScreenProps {
   user: User;
@@ -33,6 +35,7 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [quizCompleted, setQuizCompleted] = useState(false);
+  const [showCongrats, setShowCongrats] = useState(false);
 
   useEffect(() => {
     loadQuestions();
@@ -41,9 +44,11 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
   const loadQuestions = async () => {
     try {
       setLoading(true);
-      
-      // Get questions from the book's QNA set
-      if (book.qnaSet && book.qnaSet.questions) {
+      // Prefer Firestore quiz
+      const cloud = await bookService.getQuizForBook(book.gradeLevel, book.id);
+      if (cloud && cloud.questions?.length) {
+        setQuestions(cloud.questions);
+      } else if (book.qnaSet && book.qnaSet.questions) {
         setQuestions(book.qnaSet.questions);
       } else {
         Alert.alert('Error', 'No quiz available for this book');
@@ -60,41 +65,43 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
 
   const handleAnswerSelect = (answerIndex: number) => {
     setSelectedAnswer(answerIndex);
-  };
-
-  const handleNextQuestion = () => {
-    if (selectedAnswer === null) {
-      Alert.alert('Please select an answer', 'Choose one of the options before continuing.');
-      return;
-    }
-
     const currentQuestion = questions[currentQuestionIndex];
-    const isCorrect = selectedAnswer === currentQuestion.correctAnswer;
+    const isCorrect = answerIndex === currentQuestion.correctAnswer;
 
-    const userAnswer: UserAnswer = {
+    const newUserAnswers = [...userAnswers, {
       questionId: currentQuestion.id,
-      selectedAnswer,
+      selectedAnswer: answerIndex,
       isCorrect,
-    };
-
-    const newUserAnswers = [...userAnswers, userAnswer];
+    }];
     setUserAnswers(newUserAnswers);
 
-    if (currentQuestionIndex < questions.length - 1) {
-      // Move to next question
-      setCurrentQuestionIndex(currentQuestionIndex + 1);
-      setSelectedAnswer(null);
+    if (isCorrect) {
+      setShowCongrats(true);
+      setTimeout(() => {
+        setShowCongrats(false);
+        if (currentQuestionIndex < questions.length - 1) {
+          setCurrentQuestionIndex(currentQuestionIndex + 1);
+          setSelectedAnswer(null);
+        } else {
+          completeQuiz(newUserAnswers);
+        }
+      }, 1200);
     } else {
-      // Quiz completed
-      completeQuiz(newUserAnswers);
+      Alert.alert('Try again', 'That’s not correct. Give it another shot!');
+      // Do not advance; allow user to pick again
+      // Optionally clear selection after brief delay for visual feedback
+      setTimeout(() => setSelectedAnswer(null), 500);
     }
   };
 
-  const completeQuiz = (finalAnswers: UserAnswer[]) => {
+  // No explicit Next button; advancing is handled in handleAnswerSelect
+
+  const completeQuiz = async (finalAnswers: UserAnswer[]) => {
     const correctAnswers = finalAnswers.filter(answer => answer.isCorrect).length;
     const totalQuestions = questions.length;
     const score = correctAnswers;
-    const passed = book.qnaSet ? score >= book.qnaSet.passingScore : score >= Math.ceil(totalQuestions * 0.7);
+    const passingScore = Math.ceil(totalQuestions); // require all correct
+    const passed = score >= passingScore;
 
     const quizResult: QuizResult = {
       userId: user.id,
@@ -106,24 +113,34 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
       completedAt: new Date(),
       // TODO: Add sticker logic based on passing
     };
-
     setQuizCompleted(true);
-    
-    // Show result
-    setTimeout(() => {
-      Alert.alert(
-        passed ? 'Congratulations! 🎉' : 'Good Effort! 💪',
-        passed 
-          ? `You scored ${score}/${totalQuestions}! You've earned a sticker!`
-          : `You scored ${score}/${totalQuestions}. Keep reading and try again!`,
-        [
-          {
-            text: 'Continue',
-            onPress: () => onQuizComplete(quizResult),
-          },
-        ]
-      );
-    }, 500);
+
+    // Persist result
+    await bookService.saveQuizResult(quizResult);
+
+    // Award sticker if passed and for known book
+    if (passed) {
+      const sticker: Sticker = {
+        id: `sticker_${book.id}`,
+        name: `${book.title} Award`,
+        imageUrl: 'books/grade_' + book.gradeLevel + '/' + book.id + '/sticker.png',
+        description: 'Awarded for completing the quiz with all correct answers',
+      };
+      await bookService.awardSticker(user.id, sticker);
+    }
+
+    Alert.alert(
+      passed ? 'Congratulations! 🎉' : 'Good Effort! 💪',
+      passed 
+        ? `You scored ${score}/${totalQuestions}! You've earned a sticker!`
+        : `You scored ${score}/${totalQuestions}. Keep practicing and try again!`,
+      [
+        {
+          text: 'Continue',
+          onPress: () => onQuizComplete(quizResult),
+        },
+      ]
+    );
   };
 
   const currentQuestion = questions[currentQuestionIndex];
@@ -161,62 +178,35 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
         </TouchableOpacity>
         
         <View style={styles.headerCenter}>
-          <Text style={styles.bookTitle}>{book.title} - Quiz</Text>
-          <Text style={styles.questionCounter}>
-            Question {currentQuestionIndex + 1} of {questions.length}
-          </Text>
+          <Text style={styles.bookTitle} numberOfLines={1} ellipsizeMode="tail">{book.title}</Text>
+          <Text style={styles.questionCounter}>Question {currentQuestionIndex + 1} of {questions.length}</Text>
         </View>
       </View>
 
-      {/* Progress Bar */}
-      <View style={styles.progressContainer}>
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${progress}%` }]} />
-        </View>
-        <Text style={styles.progressText}>{Math.round(progress)}% Complete</Text>
-      </View>
-
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Question */}
+      <ScrollView style={styles.content} contentContainerStyle={styles.contentCenter} showsVerticalScrollIndicator={false}>
+        {/* Centered big question */}
         <View style={styles.questionContainer}>
-          <Text style={styles.questionText}>{currentQuestion.question}</Text>
+          <Text style={styles.bigQuestionText}>{currentQuestion.question}</Text>
         </View>
 
-        {/* Answer Options */}
-        <View style={styles.optionsContainer}>
+        {/* 2x2 options grid */}
+        <View style={styles.optionsGrid}>
           {currentQuestion.options.map((option, index) => (
             <TouchableOpacity
               key={index}
               style={[
-                styles.optionButton,
+                styles.optionBox,
                 selectedAnswer === index && styles.selectedOption,
               ]}
               onPress={() => handleAnswerSelect(index)}
+              activeOpacity={0.85}
             >
-              <View style={styles.optionContent}>
-                <View style={[
-                  styles.optionCircle,
-                  selectedAnswer === index && styles.selectedCircle,
-                ]}>
-                  <Text style={[
-                    styles.optionLetter,
-                    selectedAnswer === index && styles.selectedLetter,
-                  ]}>
-                    {String.fromCharCode(65 + index)}
-                  </Text>
-                </View>
-                <Text style={[
-                  styles.optionText,
-                  selectedAnswer === index && styles.selectedOptionText,
-                ]}>
-                  {option}
-                </Text>
-              </View>
+              <Text style={styles.optionBoxText}>{option}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* Explanation (if answer is selected) */}
+        {/* Optional explanation if provided */}
         {selectedAnswer !== null && currentQuestion.explanation && (
           <View style={styles.explanationContainer}>
             <Text style={styles.explanationTitle}>💡 Did you know?</Text>
@@ -225,24 +215,26 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
         )}
       </ScrollView>
 
-      {/* Next Button */}
-      <View style={styles.bottomContainer}>
-        <TouchableOpacity
-          style={[
-            styles.nextButton,
-            selectedAnswer === null && styles.disabledButton,
-          ]}
-          onPress={handleNextQuestion}
-          disabled={selectedAnswer === null}
-        >
-          <Text style={[
-            styles.nextButtonText,
-            selectedAnswer === null && styles.disabledButtonText,
-          ]}>
-            {currentQuestionIndex < questions.length - 1 ? 'Next Question' : 'Finish Quiz'} →
-          </Text>
-        </TouchableOpacity>
+      {/* Progress Bar moved to bottom */}
+      <View style={styles.progressContainerBottom}>
+        <View style={styles.progressBar}>
+          <View style={[styles.progressFill, { width: `${progress}%` }]} />
+        </View>
+        <Text style={styles.progressText}>{Math.round(progress)}% Complete</Text>
       </View>
+
+      {/* No Next button; auto-advance on correct answer */}
+
+      {/* Congrats GIF Overlay */}
+      {showCongrats && (
+        <View style={styles.overlayBackdrop} pointerEvents="none">
+          <View style={styles.overlayGlass}>
+            <View style={styles.overlayCenter}>
+              <Image source={congratsGif} style={styles.overlayGif} resizeMode="contain" />
+            </View>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 };
@@ -306,6 +298,13 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
     backgroundColor: '#F9F9F9',
   },
+  progressContainerBottom: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E0E0E0',
+    backgroundColor: '#ffffff',
+  },
   progressBar: {
     height: 6,
     backgroundColor: '#E0E0E0',
@@ -326,19 +325,61 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 20,
   },
-  questionContainer: {
-    paddingVertical: 30,
-    paddingHorizontal: 10,
+  contentCenter: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    minHeight: height * 0.8,
+    paddingTop: height * 0.08,
   },
-  questionText: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: '#333',
-    lineHeight: 28,
+  questionContainer: {
+    paddingVertical: 24,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  bigQuestionText: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#2E7D32',
+    lineHeight: 30,
     textAlign: 'center',
   },
   optionsContainer: {
     paddingVertical: 10,
+  },
+  optionsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 640,
+  },
+  optionBox: {
+    width: '48%',
+    backgroundColor: '#F5F5F5',
+    borderRadius: 14,
+    paddingVertical: 20,
+    paddingHorizontal: 14,
+    marginBottom: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  optionBoxText: {
+    fontSize: 16,
+    color: '#333',
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  selectedOption: {
+    backgroundColor: '#E8F5E8',
+    borderColor: '#2E7D32',
   },
   optionButton: {
     backgroundColor: '#F5F5F5',
@@ -346,10 +387,6 @@ const styles = StyleSheet.create({
     marginBottom: 15,
     borderWidth: 2,
     borderColor: 'transparent',
-  },
-  selectedOption: {
-    backgroundColor: '#E8F5E8',
-    borderColor: '#2E7D32',
   },
   optionContent: {
     flexDirection: 'row',
@@ -433,6 +470,35 @@ const styles = StyleSheet.create({
   },
   disabledButtonText: {
     color: '#999',
+  },
+  overlayBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    zIndex: 9999,
+    elevation: 10,
+  },
+  overlayGlass: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255,255,255,0.12)'
+  },
+  overlayGif: {
+    width: width * 1.15,
+    height: 400,
+  },
+  overlayCenter: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });
 
