@@ -16,6 +16,7 @@ import { Book, BookProgress, User } from '../types';
 import bookService from '../services/bookService';
 import audioService, { RecordingSession } from '../services/audioService';
 import UploadProgressModal from '../components/UploadProgressModal';
+import ConfirmSubmitModal from '../components/ConfirmSubmitModal';
 import storageService from '../services/storageService';
 
 const { width, height } = Dimensions.get('window');
@@ -50,6 +51,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [recordingSession, setRecordingSession] = useState<RecordingSession | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [confirmVisible, setConfirmVisible] = useState(false);
   const [localAudioPath, setLocalAudioPath] = useState<string | null>(null);
   const [recordingsByPage, setRecordingsByPage] = useState<{ [page: number]: string[] }>({});
   const [pageTime, setPageTime] = useState(0); // UI display of current page time
@@ -396,16 +398,15 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   };
 
   const handleSubmitBook = async () => {
-    // Ensure current page time is persisted before submitting
     try { await finalizePageTime(currentPage); } catch {}
-    Alert.alert(
-      'Submit Book',
-      'This will save your audio recording and submit the book. You can then take the quiz.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Submit & Save Audio', onPress: handleMandatoryUpload },
-      ]
-    );
+    setConfirmVisible(true);
+  };
+
+  // Submit in-progress: upload without asking, keep book open
+  const handleSubmitInProgress = async () => {
+    try { await finalizePageTime(currentPage); } catch {}
+    await handleMandatoryUpload();
+    Alert.alert('Saved', 'Your audio has been uploaded. You can continue reading.');
   };
 
   const handleMandatoryUpload = async () => {
@@ -526,7 +527,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
               </Text>
             </View>
           )}
-          <TouchableOpacity style={[styles.submitButton, isUploading && styles.disabledButton]} onPress={handleSubmitBook} disabled={isUploading}>
+          <TouchableOpacity style={[styles.submitButton, isUploading && styles.disabledButton]} onPress={handleSubmitInProgress} disabled={isUploading}>
             <Text style={styles.submitButtonText}>Submit</Text>
           </TouchableOpacity>
         </View>
@@ -596,6 +597,20 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       {/* Last-page Complete Button moved to navigation; removed duplicate here */}
       {/* Upload Progress Modal */}
       <UploadProgressModal visible={isUploading} progress={uploadProgress} message="Saving your audio recording..." subMessage="Please don't close the app" />
+      <ConfirmSubmitModal
+        visible={confirmVisible}
+        onClose={() => setConfirmVisible(false)}
+        onSubmitInProgress={async () => {
+          setConfirmVisible(false);
+          await handleSubmitInProgress();
+        }}
+        onCompleteBook={async () => {
+          setConfirmVisible(false);
+          await handleMandatoryUpload();
+          await bookService.completeBook(user.id, book.id);
+          Alert.alert('Completed 🎉','Your book is marked completed. You can take the quiz now.',[{ text:'OK', onPress: onBookComplete }]);
+        }}
+      />
     </SafeAreaView>
   );
 };

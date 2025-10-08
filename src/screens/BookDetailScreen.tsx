@@ -107,6 +107,10 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
   };
 
   const handleStartReading = () => {
+    if (progress?.isCompleted) {
+      Alert.alert('Completed', 'Congrats! You have completed this book. You can take the quiz.');
+      return;
+    }
     onStartReading(book);
   };
 
@@ -140,18 +144,13 @@ const BookDetailScreen: React.FC<BookDetailScreenProps> = ({
     }
     
     if (progress.isCompleted) {
-      return 'Read Again';
+      return 'Completed ✅';
     }
-    
-    if (progress.isSubmitted) {
-      return 'Continue Reading';
-    }
-    
     return `Continue Reading (Page ${progress.currentPage}/${progress.totalPages})`;
   };
 
   const isQuizAvailable = (): boolean => {
-    return progress?.isSubmitted === true || progress?.isCompleted === true;
+    return progress?.isCompleted === true;
   };
 
   const getQuizButtonText = (): string => {

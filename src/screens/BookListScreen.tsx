@@ -72,11 +72,7 @@ const BookListScreen: React.FC<BookListScreenProps> = ({
     if (progress.isCompleted) {
       return 'Completed ✅';
     }
-    
-    if (progress.isSubmitted) {
-      return 'Submitted 📤';
-    }
-    
+    // Show progress until explicitly completed
     return `Continue (Page ${progress.currentPage}/${progress.totalPages})`;
   };
 
@@ -85,7 +81,7 @@ const BookListScreen: React.FC<BookListScreenProps> = ({
     
     if (!progress) return '#2E7D32';
     if (progress.isCompleted) return '#4CAF50';
-    if (progress.isSubmitted) return '#FF9800';
+    // Submitted is treated as in-progress until explicitly completed
     return '#2196F3';
   };
 

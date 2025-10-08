@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,8 @@ import {
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { User } from '../types';
+import { User, BookProgress } from '../types';
+import bookService from '../services/bookService';
 
 const { width } = Dimensions.get('window');
 
@@ -30,6 +31,23 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 }) => {
   // Check if user has completed intensive reading requirements
   const hasCompletedIntensive = user.completedBooks.length >= 3; // Example requirement
+
+  const [completedCount, setCompletedCount] = useState<number>(user.completedBooks?.length || 0);
+  const [inProgressCount, setInProgressCount] = useState<number>(user.currentBooks?.length || 0);
+  const [stickerCount, setStickerCount] = useState<number>(user.stickers?.length || 0);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const progress = await bookService.getUserBookProgress(user.id);
+        const completed = progress.filter(p => p.isCompleted).length;
+        const inprog = progress.filter(p => !p.isCompleted).length;
+        setCompletedCount(completed);
+        setInProgressCount(inprog);
+        setStickerCount(user.stickers?.length || 0);
+      } catch {}
+    })();
+  }, [user.id]);
   
   return (
     <SafeAreaView style={styles.container}>
@@ -142,15 +160,15 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
           <Text style={styles.progressTitle}>Your Progress</Text>
           <View style={styles.progressStats}>
             <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{user.completedBooks.length}</Text>
+              <Text style={styles.statNumber}>{completedCount}</Text>
               <Text style={styles.statLabel}>Books Completed</Text>
             </View>
             <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{user.stickers.length}</Text>
+              <Text style={styles.statNumber}>{stickerCount}</Text>
               <Text style={styles.statLabel}>Stickers Earned</Text>
             </View>
             <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{user.currentBooks.length}</Text>
+              <Text style={styles.statNumber}>{inProgressCount}</Text>
               <Text style={styles.statLabel}>In Progress</Text>
             </View>
           </View>
