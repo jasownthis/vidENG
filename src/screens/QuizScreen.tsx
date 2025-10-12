@@ -36,6 +36,7 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
   const [loading, setLoading] = useState(true);
   const [quizCompleted, setQuizCompleted] = useState(false);
   const [showCongrats, setShowCongrats] = useState(false);
+  const [overlayError, setOverlayError] = useState(false);
 
   useEffect(() => {
     loadQuestions();
@@ -76,6 +77,7 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
     setUserAnswers(newUserAnswers);
 
     if (isCorrect) {
+      setOverlayError(false);
       setShowCongrats(true);
       setTimeout(() => {
         setShowCongrats(false);
@@ -230,7 +232,20 @@ const QuizScreen: React.FC<QuizScreenProps> = ({
         <View style={styles.overlayBackdrop} pointerEvents="none">
           <View style={styles.overlayGlass}>
             <View style={styles.overlayCenter}>
-              <Image source={congratsGif} style={styles.overlayGif} resizeMode="contain" />
+              {!overlayError ? (
+                <Image
+                  key={`congrats_${currentQuestionIndex}`}
+                  source={congratsGif}
+                  style={styles.overlayGif}
+                  resizeMode="contain"
+                  onError={() => setOverlayError(true)}
+                />
+              ) : (
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ fontSize: 48 }}>✅</Text>
+                  <Text style={{ marginTop: 8, color: '#2E7D32', fontWeight: '800', fontSize: 18 }}>Correct!</Text>
+                </View>
+              )}
             </View>
           </View>
         </View>

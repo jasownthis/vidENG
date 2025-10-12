@@ -196,6 +196,15 @@ class BookService {
     }
   }
 
+  // Persist unlock flag on user
+  async updateUserUnlockExtensive(userId: string, unlocked: boolean): Promise<void> {
+    try {
+      await setDoc(doc(db, 'users', userId), { unlockedExtensive: unlocked }, { merge: true });
+    } catch (e) {
+      console.error('Error updating unlock flag:', e);
+    }
+  }
+
   // Get user's progress for a specific book
   async getBookProgress(userId: string, bookId: string): Promise<BookProgress | null> {
     try {

@@ -9,7 +9,7 @@ import {
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { User, BookProgress } from '../types';
+import { User, Book, BookProgress } from '../types';
 import bookService from '../services/bookService';
 
 const { width } = Dimensions.get('window');
@@ -29,12 +29,11 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onNavigateToProfile,
   onSignOut,
 }) => {
-  // Check if user has completed intensive reading requirements
-  const hasCompletedIntensive = user.completedBooks.length >= 3; // Example requirement
-
+  // Live stats
   const [completedCount, setCompletedCount] = useState<number>(user.completedBooks?.length || 0);
   const [inProgressCount, setInProgressCount] = useState<number>(user.currentBooks?.length || 0);
   const [stickerCount, setStickerCount] = useState<number>(user.stickers?.length || 0);
+  const [canAccessExtensive, setCanAccessExtensive] = useState<boolean>(Boolean(user.unlockedExtensive));
 
   useEffect(() => {
     (async () => {
@@ -45,6 +44,16 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         setCompletedCount(completed);
         setInProgressCount(inprog);
         setStickerCount(user.stickers?.length || 0);
+
+        // Compute number of completed INTENSIVE books (cross-ref with grade books)
+        const gradeBooks = await bookService.getBooks(user.grade);
+        const byId: Record<string, Book> = {};
+        gradeBooks.forEach(b => { byId[b.id] = b; });
+        const completedIntensive = progress.filter(p => p.isCompleted && byId[p.bookId]?.category === 'intensive').length;
+        if (!user.unlockedExtensive && completedIntensive >= 4) {
+          setCanAccessExtensive(true);
+          try { await bookService.updateUserUnlockExtensive?.(user.id, true); } catch {}
+        }
       } catch {}
     })();
   }, [user.id]);
@@ -91,64 +100,64 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
           <TouchableOpacity
             style={[
               styles.sectionCard,
-              !hasCompletedIntensive && styles.disabledCard
+              !canAccessExtensive && styles.disabledCard
             ]}
-            onPress={hasCompletedIntensive ? onNavigateToExtensive : undefined}
-            disabled={!hasCompletedIntensive}
+            onPress={canAccessExtensive ? onNavigateToExtensive : undefined}
+            disabled={!canAccessExtensive}
           >
             <View style={styles.sectionIconContainer}>
               <Text style={styles.sectionIcon}>🚀</Text>
             </View>
             <Text style={[
               styles.sectionTitle,
-              !hasCompletedIntensive && styles.disabledText
+              !canAccessExtensive && styles.disabledText
             ]}>
               Extensive Reading
             </Text>
             <Text style={[
               styles.sectionDescription,
-              !hasCompletedIntensive && styles.disabledText
+              !canAccessExtensive && styles.disabledText
             ]}>
-              {hasCompletedIntensive 
+              {canAccessExtensive 
                 ? "Read faster with time challenges. Build reading fluency and speed."
-                : "Complete Intensive Reading first to unlock this section!"
+                : "Complete 4 Intensive books to unlock this section!"
               }
             </Text>
             <View style={styles.sectionFeatures}>
               <Text style={[
                 styles.featureText,
-                !hasCompletedIntensive && styles.disabledText
+                !canAccessExtensive && styles.disabledText
               ]}>
                 • Timed reading challenges
               </Text>
               <Text style={[
                 styles.featureText,
-                !hasCompletedIntensive && styles.disabledText
+                !canAccessExtensive && styles.disabledText
               ]}>
                 • Penalty system for motivation
               </Text>
               <Text style={[
                 styles.featureText,
-                !hasCompletedIntensive && styles.disabledText
+                !canAccessExtensive && styles.disabledText
               ]}>
                 • Speed building exercises
               </Text>
             </View>
             <View style={[
               styles.sectionButton,
-              !hasCompletedIntensive && styles.disabledButton
+              !canAccessExtensive && styles.disabledButton
             ]}>
               <Text style={[
                 styles.sectionButtonText,
-                !hasCompletedIntensive && styles.disabledButtonText
+                !canAccessExtensive && styles.disabledButtonText
               ]}>
-                {hasCompletedIntensive ? 'Start Challenge' : '🔒 Locked'}
+                {canAccessExtensive ? 'Start Challenge' : '🔒 Locked'}
               </Text>
             </View>
-            {!hasCompletedIntensive && (
+            {!canAccessExtensive && (
               <View style={styles.unlockRequirement}>
                 <Text style={styles.unlockText}>
-                  Complete 3 Intensive books to unlock
+                  Complete 4 Intensive books to unlock
                 </Text>
               </View>
             )}

@@ -9,6 +9,8 @@ export interface User {
   stickers: Sticker[];
   completedBooks: string[];
   currentBooks: BookProgress[];
+  // Permanently unlock Extensive section once criteria met
+  unlockedExtensive?: boolean;
 }
 
 // Book Types

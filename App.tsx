@@ -113,9 +113,8 @@ const App: React.FC = () => {
   };
 
   const handleBookComplete = () => {
-    // TODO: Navigate to quiz screen
-    setCurrentScreen('home');
-    setSelectedBook(null);
+    // After completion, return to book detail
+    setCurrentScreen('bookDetail');
   };
 
   const handleQuizComplete = (result: QuizResult) => {

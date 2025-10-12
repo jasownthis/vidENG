@@ -10,7 +10,9 @@
     "test": "jest",
     "upload:book": "node scripts/uploadBookToCloud.js",
     "upload:convert": "node scripts/convertAndUploadBook.js",
-    "quiz:write": "node scripts/writeQuizForBook.js"
+    "quiz:write": "node scripts/writeQuizForBook.js",
+    "quiz:set": "node scripts/setQuiz.js",
+    "quiz:import": "node scripts/importQuizFromFile.js"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^1.24.0",

@@ -406,10 +406,13 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const handleSubmitInProgress = async () => {
     try { await finalizePageTime(currentPage); } catch {}
     await handleMandatoryUpload();
-    Alert.alert('Saved', 'Your audio has been uploaded. You can continue reading.');
+    await bookService.submitBook(user.id, book.id);
+    Alert.alert('Saved', 'Your audio has been uploaded. You can continue reading.', [
+      { text: 'OK', onPress: onBack }
+    ]);
   };
 
-  const handleMandatoryUpload = async () => {
+  const handleMandatoryUpload = async (markSubmitted: boolean = false) => {
     try {
       setIsUploading(true);
       setUploadProgress(0);
@@ -456,10 +459,9 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         }
       }
       setUploadProgress(100);
-      await bookService.submitBook(user.id, book.id);
       setIsUploading(false);
       setRecordingsByPage({});
-      Alert.alert('Success! 🎉', 'Your audio has been saved and book submitted! You can now take the quiz.', [{ text: 'Continue', onPress: onBookComplete }]);
+      // Caller decides what to show next (in-progress vs complete)
     } catch (error) {
       console.error('Error in mandatory upload:', error);
       setIsUploading(false);
