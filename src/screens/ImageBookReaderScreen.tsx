@@ -153,6 +153,26 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       // tick the current page stopwatch and reflect in pageTime
       setTimersByPage(prev => {
         const current = prev[currentPage] ?? 0;
+
+        // Stop timer for intensive if capped or reached 600s
+        if (book.category === 'intensive') {
+          const isPageCapped = cappedByPage[currentPage] === true || current >= 600;
+          if (isPageCapped) {
+            setPageTime(current);
+            return prev;
+          }
+        }
+
+        // Stop timer for extensive if this page has exceeded 7m (lifeline cap)
+        if (book.category === 'extensive') {
+          const persistedTotal = (((progress?.pageTimers as any) || {})[currentPage]?.totalTime) || 0;
+          const hasExceeded = exceededPages[currentPage] === true || current >= 420 || persistedTotal >= 420;
+          if (hasExceeded) {
+            setPageTime(current);
+            return prev;
+          }
+        }
+
         const next = current + 1;
         const updated = { ...prev, [currentPage]: next };
         setPageTime(next);
@@ -165,24 +185,51 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         if (isCapped && session?.isRecording) {
           audioService.stopRecording().catch(() => {});
         }
-        if (!isCapped && session?.isRecording) {
+        if (!isCapped) {
           const currentRecorded = recordedByPage[currentPage] ?? 0;
-          if (currentRecorded < 600) {
-            const nextRecorded = Math.min(600, currentRecorded + 1);
+          // Use native session duration if available for immediate detection
+          const nativeDuration = session?.duration ?? 0; // seconds while recording
+          const candidateRecorded = session?.isRecording ? Math.max(currentRecorded, nativeDuration) : currentRecorded;
+          const pageElapsed = (timersByPage[currentPage] ?? 0); // per-page elapsed time for UI
+
+          // Hard guard: if page elapsed reaches 600, cap immediately (ensures exact 10:00 UI)
+          if (pageElapsed >= 600) {
+            (async () => {
+              try {
+                // Save the last segment causing the cap
+                await stopCurrentRecording();
+              } catch {}
+              setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
+              setRecordingStopped(true);
+              try {
+                await persistCapForPage(currentPage, Math.max(candidateRecorded, 600));
+              } catch {}
+            })();
+          } else if (session?.isRecording) {
+            // While recording, advance recorded time and cap at 600
+            const nextRecorded = Math.min(600, candidateRecorded + 1);
             if (nextRecorded !== currentRecorded) {
               setRecordedByPage(prev => ({ ...prev, [currentPage]: nextRecorded }));
             }
-            if (nextRecorded >= 600) {
-              // Cap reached: stop recording, mark capped, persist
-              audioService.stopRecording().catch(() => {});
-              setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
-              setRecordingStopped(true);
-              // Persist cap and recorded seconds
+            if (nativeDuration >= 600 || nextRecorded >= 600) {
               (async () => {
                 try {
-                  await persistCapForPage(currentPage, nextRecorded);
+                  // Save the last segment causing the cap
+                  await stopCurrentRecording();
+                } catch {}
+                setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
+                setRecordingStopped(true);
+                try {
+                  await persistCapForPage(currentPage, Math.max(nextRecorded, nativeDuration));
                 } catch {}
               })();
+            }
+          } else {
+            // If not recording but recorded time already persisted >= 600, reflect banner
+            const persistedRec = (((progress?.pageTimers as any) || {})[currentPage]?.recordedTotalSeconds) || 0;
+            if (persistedRec >= 600) {
+              setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
+              setRecordingStopped(true);
             }
           }
         }
@@ -321,18 +368,22 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         startedAt: progress?.startedAt || new Date(),
         pageTimers: (progress?.pageTimers as any) || {},
         penaltyCount: progress?.penaltyCount || 0,
-      };
+      } as any;
 
       const pageKey = page.toString();
       const absolute = timersByPage[page] ?? 0;
+      const prevTimer = (updatedProgress.pageTimers as any)[pageKey] as any;
+      const cumulativeRecorded = recordedByPage[page] ?? prevTimer?.recordedTotalSeconds ?? 0;
 
       (updatedProgress.pageTimers as any)[pageKey] = {
         pageNumber: page,
-        startTime: startTime,
+        startTime: prevTimer?.startTime || startTime,
         totalTime: absolute,
-        exceedanceCount: ((progress?.pageTimers as any)?.[pageKey]?.exceedanceCount) || 0,
+        exceedanceCount: prevTimer?.exceedanceCount || 0,
         isCompleted: true,
-      };
+        recordedTotalSeconds: cumulativeRecorded,
+        isCapped: prevTimer?.isCapped || false,
+      } as any;
 
       await bookService.updateBookProgress(updatedProgress);
       setProgress(updatedProgress);
