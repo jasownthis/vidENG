@@ -67,6 +67,8 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [exceededPages, setExceededPages] = useState<{ [page: number]: boolean }>({});
   const [lifelineToast, setLifelineToast] = useState<string | null>(null);
   const [timeLimitVisible, setTimeLimitVisible] = useState<boolean>(false);
+  const [timeLimitTitle, setTimeLimitTitle] = useState<string>('Time limit 7m reached');
+  const [timeLimitMessage, setTimeLimitMessage] = useState<string>('Your session is restarted from the first page. Audio for this book was cleared.');
 
   // Prefer cloud URLs when available; fallback to bundled assets
   const localPageImages = {
@@ -89,17 +91,27 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   };
 
   useEffect(() => {
-    loadProgress();
-    setStartTime(new Date());
-    
-    // Start recording when component mounts
-    startRecordingForPage(currentPage);
-    
+    (async () => {
+      await loadProgress();
+      setStartTime(new Date());
+      // Start recording after progress is seeded (so caps are respected)
+      // defer actual start to a separate effect that listens to progress/currentPage
+    })();
+
     return () => {
       // Cleanup on unmount
       audioService.cleanup();
     };
   }, []);
+
+  // Start recording when progress is available and we're on a page that allows recording
+  useEffect(() => {
+    if (!progress) return;
+    (async () => {
+      await startRecordingForPage(currentPage);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress, currentPage]);
 
   const handleBackPress = async () => {
     try {
@@ -187,20 +199,33 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
     const current = timersByPage[currentPage] ?? 0;
     if (current < 420) return;
 
-    // Prevent re-trigger for same page
+    // Prevent re-trigger for same page within this session
     if (exceededPages[currentPage]) return;
 
     if (total === 1) {
       setExceededPages(prev => ({ ...prev, [currentPage]: true }));
       (async () => {
-        try { await audioService.stopRecording(); } catch {}
-        await handleExtensiveReset();
+        try { await stopCurrentRecording(); } catch {}
+        await handleExtensiveReset('Time limit 7m reached', 'Your session is restarted from the first page. Audio for this book was cleared.');
       })();
       return;
     }
 
     if (total === 2) {
+      const priorExceeds = (exceededPages[1] ? 1 : 0) + (exceededPages[2] ? 1 : 0);
+      // Mark this page exceeded now
       setExceededPages(prev => ({ ...prev, [currentPage]: true }));
+
+      if (priorExceeds >= 1) {
+        // This is the second exceed -> reset immediately
+        (async () => {
+          try { await stopCurrentRecording(); } catch {}
+          await handleExtensiveReset('7m reached for both pages', 'Both pages exceeded 7:00. Restarting from page 1; audio has been cleared.');
+        })();
+        return;
+      }
+
+      // First exceed -> consume lifeline
       if (!lifelineUsed) {
         // Consume lifeline: stop recording and cap this page; allow continuing on the other page
         setLifelineUsed(true);
@@ -208,7 +233,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         setTimeout(() => setLifelineToast(null), 2000);
         setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
         (async () => {
-          try { await audioService.stopRecording(); } catch {}
+          try { await stopCurrentRecording(); } catch {}
           try {
             const updated = await finalizePageTime(currentPage);
             (updated as any).lifelineUsed = true;
@@ -216,11 +241,9 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           } catch {}
         })();
       } else {
-        // Second exceed => reset
-        (async () => {
-          try { await audioService.stopRecording(); } catch {}
-          await handleExtensiveReset();
-        })();
+        // Lifeline already used but only one page exceeded: ensure cap, do nothing else
+        setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
+        (async () => { try { await stopCurrentRecording(); } catch {} })();
       }
     }
   }, [timersByPage, currentPage, book.category, lifelineUsed, exceededPages]);
@@ -258,6 +281,24 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         setRecordedByPage(prev => ({ ...prev, ...seededRecorded }));
         setCappedByPage(prev => ({ ...prev, ...seededCapped }));
         if ((userProgress as any).lifelineUsed) setLifelineUsed(true);
+        // For extensive 2-page books: seed exceededPages and cap pages ≥ 420s
+        if (book.category === 'extensive') {
+          const totalPages = getTotalPages();
+          if (totalPages === 2) {
+            const seededExceeded: { [page: number]: boolean } = {};
+            Object.keys(seededTimers).forEach((k: string) => {
+              const p = parseInt(k, 10);
+              if (seededTimers[p] >= 420) {
+                seededExceeded[p] = true;
+              }
+            });
+            if (Object.keys(seededExceeded).length > 0) {
+              setExceededPages(prev => ({ ...prev, ...seededExceeded }));
+              // Ensure recording is capped for exceeded pages
+              setCappedByPage(prev => ({ ...prev, ...Object.keys(seededExceeded).reduce((acc: any, k: any) => { acc[parseInt(k,10)] = true; return acc; }, {}) }));
+            }
+          }
+        }
         setPageTime(saved);
         setOvertimeTriggered(saved >= 420);
         setRecordingStopped(seededCapped[cp] === true);
@@ -304,7 +345,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   };
 
   // Extensive reset: close book, delete audio, restart from first page
-  const handleExtensiveReset = async () => {
+  const handleExtensiveReset = async (title?: string, message?: string) => {
     try {
       await audioService.stopRecording();
       await storageService.deleteAllUserBookAudio(user.id, book.id, user.grade);
@@ -315,6 +356,8 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       setExceededPages({});
       setCappedByPage({});
       setLifelineUsed(false);
+      if (title) setTimeLimitTitle(title);
+      if (message) setTimeLimitMessage(message);
       setTimeLimitVisible(true);
     } catch (e) {
       console.error('Error resetting extensive session:', e);
@@ -345,6 +388,20 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           return;
         }
       }
+
+      // For extensive: block recording on pages that already exceeded 7m (lifeline stop)
+      if (book.category === 'extensive') {
+        const pageKey = pageNumber.toString();
+        const persistedTotal = (((progress?.pageTimers as any) || {})[pageKey]?.totalTime) || 0;
+        const exceeded = exceededPages[pageNumber] === true || (timersByPage[pageNumber] ?? 0) >= 420 || persistedTotal >= 420;
+        if (exceeded) {
+          // Mark as capped locally to avoid future attempts
+          setCappedByPage(prev => ({ ...prev, [pageNumber]: true }));
+          // Do not start recorder
+          return;
+        }
+      }
+
       const success = await audioService.startRecording(pageNumber);
       if (!success) {
         Alert.alert('Recording Error', 'Could not start recording for this page.');
@@ -575,6 +632,20 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           <Text style={{ color: '#856404' }}>You can continue reading, but no more audio will be saved on this page.</Text>
         </View>
       )}
+      {/* Recording stopped banner (extensive lifeline per-page cap) */}
+      {book.category === 'extensive' && (
+        (() => {
+          const persisted = ((progress?.pageTimers as any)?.[currentPage]?.totalTime ?? 0) as number;
+          const exceeded = exceededPages[currentPage] || (timersByPage[currentPage] ?? 0) >= 420 || persisted >= 420;
+          if (!exceeded) return null;
+          return (
+            <View style={{ backgroundColor: '#FFF3CD', borderColor: '#FFEEBA', borderWidth: 1, marginHorizontal: 15, marginTop: 8, borderRadius: 8, padding: 10 }}>
+              <Text style={{ color: '#856404', fontWeight: '600' }}>Recording stopped at 7:00 for this page.</Text>
+              <Text style={{ color: '#856404' }}>You can continue reading, but no more audio will be saved on this page.</Text>
+            </View>
+          );
+        })()
+      )}
 
       {/* Book Page Image */}
       <View style={styles.contentContainer}>
@@ -640,8 +711,8 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       )}
       <TimeLimitModal
         visible={book.category === 'extensive' && timeLimitVisible}
-        title="Time limit 7m reached"
-        message="Your session is restarted from the first page. Audio for this book was cleared."
+        title={timeLimitTitle}
+        message={timeLimitMessage}
         onClose={() => {
           setTimeLimitVisible(false);
           // Exit to Book Detail after time-limit reset
