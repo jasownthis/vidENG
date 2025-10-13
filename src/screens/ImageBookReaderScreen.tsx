@@ -17,6 +17,7 @@ import bookService from '../services/bookService';
 import audioService, { RecordingSession } from '../services/audioService';
 import UploadProgressModal from '../components/UploadProgressModal';
 import ConfirmSubmitModal from '../components/ConfirmSubmitModal';
+import TimeLimitModal from '../components/TimeLimitModal';
 import storageService from '../services/storageService';
 
 const { width, height } = Dimensions.get('window');
@@ -61,6 +62,11 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [recordingStopped, setRecordingStopped] = useState(false); // intensive cap reached (immediate)
   const [recordedByPage, setRecordedByPage] = useState<{ [page: number]: number }>({}); // cumulative recorded seconds per page
   const [cappedByPage, setCappedByPage] = useState<{ [page: number]: boolean }>({}); // page permanently capped at 10m
+  // Extensive-only state
+  const [lifelineUsed, setLifelineUsed] = useState<boolean>(false);
+  const [exceededPages, setExceededPages] = useState<{ [page: number]: boolean }>({});
+  const [lifelineToast, setLifelineToast] = useState<string | null>(null);
+  const [timeLimitVisible, setTimeLimitVisible] = useState<boolean>(false);
 
   // Prefer cloud URLs when available; fallback to bundled assets
   const localPageImages = {
@@ -176,18 +182,48 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
 
   // Handle extensive overtime off the per-page stopwatch
   useEffect(() => {
-    if (book.category === 'extensive') {
-      const current = timersByPage[currentPage] ?? 0;
-      if (!overtimeTriggered && current >= 420) {
-        setOverTimeCount(prev => prev + 1);
-        setOvertimeTriggered(true);
-        const total = getTotalPages();
-        if (total <= 2) {
-          handleExtensiveReset();
-        }
+    if (book.category !== 'extensive') return;
+    const total = getTotalPages();
+    const current = timersByPage[currentPage] ?? 0;
+    if (current < 420) return;
+
+    // Prevent re-trigger for same page
+    if (exceededPages[currentPage]) return;
+
+    if (total === 1) {
+      setExceededPages(prev => ({ ...prev, [currentPage]: true }));
+      (async () => {
+        try { await audioService.stopRecording(); } catch {}
+        await handleExtensiveReset();
+      })();
+      return;
+    }
+
+    if (total === 2) {
+      setExceededPages(prev => ({ ...prev, [currentPage]: true }));
+      if (!lifelineUsed) {
+        // Consume lifeline: stop recording and cap this page; allow continuing on the other page
+        setLifelineUsed(true);
+        setLifelineToast('Lifeline used: recording stopped for this page');
+        setTimeout(() => setLifelineToast(null), 2000);
+        setCappedByPage(prev => ({ ...prev, [currentPage]: true }));
+        (async () => {
+          try { await audioService.stopRecording(); } catch {}
+          try {
+            const updated = await finalizePageTime(currentPage);
+            (updated as any).lifelineUsed = true;
+            await bookService.updateBookProgress(updated);
+          } catch {}
+        })();
+      } else {
+        // Second exceed => reset
+        (async () => {
+          try { await audioService.stopRecording(); } catch {}
+          await handleExtensiveReset();
+        })();
       }
     }
-  }, [timersByPage, currentPage, book.category, overtimeTriggered]);
+  }, [timersByPage, currentPage, book.category, lifelineUsed, exceededPages]);
 
   const loadProgress = async () => {
     try {
@@ -200,8 +236,8 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         const seededTimers: { [page: number]: number } = {};
         const seededRecorded: { [page: number]: number } = {};
         const seededCapped: { [page: number]: boolean } = {};
-        const timersMap = userProgress.pageTimers || {} as any;
-        Object.keys(timersMap).forEach((k) => {
+        const timersMap: any = (userProgress as any).pageTimers || {};
+        Object.keys(timersMap).forEach((k: string) => {
           const p = parseInt(k, 10);
           const t = timersMap[k];
           if (!isNaN(p) && t) {
@@ -221,6 +257,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         setTimersByPage(prev => ({ ...prev, ...seededTimers }));
         setRecordedByPage(prev => ({ ...prev, ...seededRecorded }));
         setCappedByPage(prev => ({ ...prev, ...seededCapped }));
+        if ((userProgress as any).lifelineUsed) setLifelineUsed(true);
         setPageTime(saved);
         setOvertimeTriggered(saved >= 420);
         setRecordingStopped(seededCapped[cp] === true);
@@ -241,19 +278,18 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
         isCompleted: false,
         isSubmitted: false,
         startedAt: progress?.startedAt || new Date(),
-        pageTimers: progress?.pageTimers || {},
+        pageTimers: (progress?.pageTimers as any) || {},
         penaltyCount: progress?.penaltyCount || 0,
-        exceedanceCount: progress?.exceedanceCount || 0,
       };
 
       const pageKey = page.toString();
       const absolute = timersByPage[page] ?? 0;
 
-      updatedProgress.pageTimers[pageKey] = {
+      (updatedProgress.pageTimers as any)[pageKey] = {
         pageNumber: page,
         startTime: startTime,
         totalTime: absolute,
-        exceedanceCount: updatedProgress.pageTimers[pageKey]?.exceedanceCount || 0,
+        exceedanceCount: ((progress?.pageTimers as any)?.[pageKey]?.exceedanceCount) || 0,
         isCompleted: true,
       };
 
@@ -272,16 +308,14 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
     try {
       await audioService.stopRecording();
       await storageService.deleteAllUserBookAudio(user.id, book.id, user.grade);
-      Alert.alert(
-        'Time limit exceeded',
-        'You exceeded the 7-minute limit. Your session is reset to the first page.',
-        [{ text: 'OK', onPress: () => {
-          setCurrentPage(1);
-          setPageTime(0);
-          setRecordingsByPage({});
-          startRecordingForPage(1);
-        }}]
-      );
+      // Reset timers entirely in Firestore and locally
+      await bookService.resetBookProgress(user.id, book.id);
+      setTimersByPage({});
+      setRecordedByPage({});
+      setExceededPages({});
+      setCappedByPage({});
+      setLifelineUsed(false);
+      setTimeLimitVisible(true);
     } catch (e) {
       console.error('Error resetting extensive session:', e);
     }
@@ -489,9 +523,9 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       } as any;
 
       const pageKey = page.toString();
-      const absolute = timersByPage[page] ?? progress?.pageTimers?.[pageKey]?.totalTime ?? 0;
-      const prevTimer = updatedProgress.pageTimers[pageKey] as any;
-      updatedProgress.pageTimers[pageKey] = {
+      const absolute = timersByPage[page] ?? ((progress?.pageTimers as any)?.[pageKey]?.totalTime) ?? 0;
+      const prevTimer = (updatedProgress.pageTimers as any)[pageKey] as any;
+      (updatedProgress.pageTimers as any)[pageKey] = {
         pageNumber: page,
         startTime: prevTimer?.startTime || startTime,
         totalTime: absolute,
@@ -558,7 +592,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       {/* Navigation Controls */}
       <View style={styles.navigationContainer}>
         <TouchableOpacity style={[styles.navButton, currentPage === 1 && styles.disabledButton]} onPress={handlePreviousPage} disabled={currentPage === 1}>
-          <Text style={[styles.navButtonText, currentPage === 1 && styles.disabledText]}>← Previous</Text>
+          <Text style={[{ color: '#ffffff', fontSize: 14, fontWeight: 'bold' } as any, currentPage === 1 && styles.disabledText]}>← Previous</Text>
         </TouchableOpacity>
         <View style={styles.pageIndicator}><Text style={styles.pageText}>{currentPage} / {getTotalPages()}</Text></View>
         {(() => {
@@ -571,7 +605,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
             return (
               <View style={{ alignItems: 'flex-end' }}>
                 <TouchableOpacity style={[styles.navButton, nextDisabled && styles.disabledButton]} onPress={handleNextPage} disabled={nextDisabled}>
-                  <Text style={[styles.navButtonText, nextDisabled && styles.disabledText]}>Next →</Text>
+                <Text style={[{ color: '#ffffff', fontSize: 14, fontWeight: 'bold' } as any, nextDisabled && styles.disabledText]}>Next →</Text>
                 </TouchableOpacity>
                 {currentSeconds < 120 && (<Text style={{ fontSize: 12, color: '#999', marginTop: 4 }}>Need {remaining}s more</Text>)}
               </View>
@@ -582,7 +616,7 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
           return (
             <View style={{ alignItems: 'flex-end' }}>
               <TouchableOpacity style={[styles.navButton, completeDisabled && styles.disabledButton]} onPress={handleSubmitBook} disabled={completeDisabled}>
-                <Text style={[styles.navButtonText, completeDisabled && styles.disabledText]}>Complete</Text>
+                <Text style={[{ color: '#ffffff', fontSize: 14, fontWeight: 'bold' } as any, completeDisabled && styles.disabledText]}>Complete</Text>
               </TouchableOpacity>
               {currentSeconds < 120 && (<Text style={{ fontSize: 12, color: '#999', marginTop: 4 }}>Need {remaining}s more</Text>)}
             </View>
@@ -599,6 +633,21 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
       {/* Last-page Complete Button moved to navigation; removed duplicate here */}
       {/* Upload Progress Modal */}
       <UploadProgressModal visible={isUploading} progress={uploadProgress} message="Saving your audio recording..." subMessage="Please don't close the app" />
+      {book.category === 'extensive' && lifelineToast && (
+        <View style={{ position: 'absolute', bottom: 90, left: 20, right: 20, backgroundColor: '#FFF3CD', borderColor: '#FFEEBA', borderWidth: 1, borderRadius: 8, padding: 10 }}>
+          <Text style={{ color: '#856404', textAlign: 'center', fontWeight: '600' }}>{lifelineToast}</Text>
+        </View>
+      )}
+      <TimeLimitModal
+        visible={book.category === 'extensive' && timeLimitVisible}
+        title="Time limit 7m reached"
+        message="Your session is restarted from the first page. Audio for this book was cleared."
+        onClose={() => {
+          setTimeLimitVisible(false);
+          // Exit to Book Detail after time-limit reset
+          onBack();
+        }}
+      />
       <ConfirmSubmitModal
         visible={confirmVisible}
         onClose={() => setConfirmVisible(false)}

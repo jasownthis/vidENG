@@ -44,6 +44,8 @@ export interface BookProgress {
   completedAt?: Date;
   pageTimers: { [pageNumber: number]: PageTimer };
   penaltyCount: number;
+  // Extensive only: mark if a single lifeline has been used across pages
+  lifelineUsed?: boolean;
 }
 
 export interface PageTimer {

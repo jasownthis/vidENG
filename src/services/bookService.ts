@@ -205,6 +205,26 @@ class BookService {
     }
   }
 
+  // Reset a user's book progress timers (used for extensive reset)
+  async resetBookProgress(userId: string, bookId: string): Promise<void> {
+    try {
+      const ref = doc(db, 'bookProgress', `${userId}_${bookId}`);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      const updated: any = {
+        currentPage: 1,
+        pageTimers: {},
+        lifelineUsed: false,
+        isSubmitted: false,
+        updatedAt: new Date(),
+      };
+      await setDoc(ref, updated, { merge: true });
+    } catch (e) {
+      console.error('Error resetting book progress:', e);
+    }
+  }
+
   // Get user's progress for a specific book
   async getBookProgress(userId: string, bookId: string): Promise<BookProgress | null> {
     try {
