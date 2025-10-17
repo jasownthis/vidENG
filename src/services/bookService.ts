@@ -1,5 +1,5 @@
 import { Book, BookProgress, BookPage, QNASet, QuizResult, Sticker } from '../types';
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where, addDoc } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, setDoc, query, where } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import storageService from './storageService';
 
@@ -109,7 +109,13 @@ class BookService {
       const resolved: Book[] = [];
       for (const b of books) {
         if (b.coverUrl && !b.coverUrl.startsWith('http')) {
-          try { b.coverUrl = await storageService.getDownloadUrlForPath(b.coverUrl); } catch {}
+          try {
+            b.coverUrl = await storageService.getDownloadUrlForPath(b.coverUrl);
+          } catch {
+            // If resolving to a download URL fails (e.g., due to Storage rules),
+            // clear the cover so UI will render a placeholder instead of an invalid URI.
+            b.coverUrl = '';
+          }
         }
         const pages: BookPage[] = [];
         for (const pg of b.pages) {
@@ -211,7 +217,7 @@ class BookService {
       const ref = doc(db, 'bookProgress', `${userId}_${bookId}`);
       const snap = await getDoc(ref);
       if (!snap.exists()) return;
-      const data = snap.data() as any;
+      /* const data = snap.data() as any; */
       const updated: any = {
         currentPage: 1,
         pageTimers: {},

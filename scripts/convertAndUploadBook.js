@@ -1,6 +1,6 @@
 // Convert a PDF into page images and upload to Firebase Storage + Firestore (grade-scoped)
 // Usage:
-//   node scripts/convertAndUploadBook.js <bookId> <title> <description> <grade> <category> <pdfPath>
+//   node scripts/convertAndUploadBook.js <bookId> <title> <description> <grade> <category> <pdfPath> [coverPath]
 // Requires GOOGLE_APPLICATION_CREDENTIALS set to a Firebase service account JSON
 
 const fs = require('fs');
@@ -71,9 +71,9 @@ async function uploadFile(bucket, localPath, destPath, contentType) {
 }
 
 async function main() {
-  const [bookId, title, description, gradeArg, category, pdfPath] = process.argv.slice(2);
+  const [bookId, title, description, gradeArg, category, pdfPath, coverPathArg] = process.argv.slice(2);
   if (!bookId || !title || !description || !gradeArg || !category || !pdfPath) {
-    console.error('Usage: node scripts/convertAndUploadBook.js <bookId> <title> <description> <grade> <category> <pdfPath>');
+    console.error('Usage: node scripts/convertAndUploadBook.js <bookId> <title> <description> <grade> <category> <pdfPath> [coverPath]');
     process.exit(1);
   }
   const gradeLevel = parseInt(gradeArg, 10);
@@ -92,11 +92,16 @@ async function main() {
   const pageFiles = await convertPdfToPngs(pdfPath, outDir, prefix);
   console.log(`Generated ${pageFiles.length} pages in ${outDir}`);
 
-  // Upload cover (first page), all pages, and the original PDF
+  // Upload cover (use provided coverPath if exists, otherwise first page), all pages, and the original PDF
   const basePath = `books/grade_${gradeLevel}/${bookId}`;
   const coverPath = `${basePath}/cover.png`;
-  await uploadFile(bucket, pageFiles[0], coverPath, 'image/png');
-  console.log('Uploaded cover:', coverPath);
+  if (coverPathArg && fs.existsSync(coverPathArg)) {
+    await uploadFile(bucket, coverPathArg, coverPath, 'image/png');
+    console.log('Uploaded provided cover:', coverPath);
+  } else {
+    await uploadFile(bucket, pageFiles[0], coverPath, 'image/png');
+    console.log('Uploaded cover from first page:', coverPath);
+  }
 
   const pagePaths = [];
   for (let i = 0; i < pageFiles.length; i++) {
