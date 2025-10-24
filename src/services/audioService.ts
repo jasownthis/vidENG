@@ -1,12 +1,8 @@
-import Sound, {
-  type AudioSet,
-  AudioEncoderAndroidType,
-  OutputFormatAndroidType,
-} from 'react-native-nitro-sound';
 import { Platform, PermissionsAndroid, Alert } from 'react-native';
 import storageService from './storageService';
 import * as RNFS from 'react-native-fs';
 import NetInfo from '@react-native-community/netinfo';
+import AudioRecorder from '../native/AudioRecorderModule';
 
 export interface RecordingSession {
   isRecording: boolean;
@@ -22,7 +18,6 @@ export interface AudioMergeResult {
 }
 
 class AudioService {
-  private recorder: typeof Sound | null = null;
   private currentSession: RecordingSession | null = null;
   private recordingTimer: NodeJS.Timeout | null = null;
 
@@ -55,12 +50,7 @@ class AudioService {
   /**
    * Initialize the audio recorder
    */
-  private async initializeRecorder(): Promise<void> {
-    // Nitro Sound exposes a singleton-like default export. No explicit init required.
-    if (!this.recorder) {
-      this.recorder = Sound;
-    }
-  }
+  private async initializeRecorder(): Promise<void> {}
 
   /**
    * Start recording audio for a specific page
@@ -82,19 +72,7 @@ class AudioService {
         await this.stopRecording();
       }
 
-      // Configure audio settings (closest to PCM-like quality within Android MediaRecorder constraints)
-      // NOTE: MediaRecorder does not natively support WAV on Android. We record to MPEG_4/AAC.
-      // The returned URI will be used for upload. Merging will require container-aware processing later.
-      const audioSets: AudioSet = {
-        OutputFormatAndroid: OutputFormatAndroidType.MPEG_4,
-        AudioEncoderAndroid: AudioEncoderAndroidType.AAC,
-        AudioSamplingRate: 44100,
-        AudioChannels: 1,
-        AudioEncodingBitRate: 128000,
-      };
-
-      // Let native side choose a proper file path if uri is omitted; method returns a file:// URI
-      const fileUri = await this.recorder.startRecorder(undefined, audioSets, false);
+      const fileUri = await AudioRecorder.startRecording(pageNumber);
 
       // Create recording session
       this.currentSession = {
@@ -126,8 +104,7 @@ class AudioService {
         return null;
       }
 
-      // Stop the recorder
-      const resultUri = await this.recorder!.stopRecorder();
+      const resultUri = await AudioRecorder.stopRecording();
       
       // Stop duration timer
       this.stopDurationTimer();
@@ -192,21 +169,7 @@ class AudioService {
     }
   }
 
-  /**
-   * Convert local audio file to blob for upload
-   */
-  async audioFileToBlob(filePath: string): Promise<Blob> {
-    try {
-      // Normalize to file:// URI expected by fetch
-      const uri = filePath.startsWith('file://') ? filePath : `file://${filePath}`;
-      const response = await fetch(uri);
-      const blob = await response.blob();
-      return blob;
-    } catch (error) {
-      console.error('Error converting audio file to blob:', error);
-      throw error;
-    }
-  }
+  // Removed blob conversion
 
   // FFmpeg removal: no local concatenation; segments are uploaded individually
 
@@ -230,15 +193,18 @@ class AudioService {
 
       onProgress?.(10);
 
-      // Step 2: Convert local file to blob
-      const newAudioBlob = await this.audioFileToBlob(localFilePath);
+      // Step 2: Read file as base64 using RNFS
+      const path = localFilePath.replace('file://', '');
+      const exists = await RNFS.exists(path);
+      if (!exists) throw new Error(`Recorded file not found at ${path}`);
+      const base64 = await RNFS.readFile(path, 'base64');
       onProgress?.(20);
       onProgress?.(40);
 
       // Step 3: Upload this segment as-is (no merge)
       const timestamp = Date.now();
       const downloadURL = await storageService.uploadAudioFile(
-        newAudioBlob,
+        base64,
         userId,
         bookId,
         gradeLevel,
@@ -281,10 +247,6 @@ class AudioService {
       
       this.stopDurationTimer();
       
-      if (this.recorder) {
-        await this.recorder.release();
-        this.recorder = null;
-      }
     } catch (error) {
       console.error('Error during cleanup:', error);
     }

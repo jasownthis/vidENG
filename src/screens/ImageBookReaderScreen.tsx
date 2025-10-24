@@ -70,24 +70,14 @@ const ImageBookReaderScreen: React.FC<ImageBookReaderScreenProps> = ({
   const [timeLimitTitle, setTimeLimitTitle] = useState<string>('Time limit 7m reached');
   const [timeLimitMessage, setTimeLimitMessage] = useState<string>('Your session is restarted from the first page. Audio for this book was cleared.');
 
-  // Prefer cloud URLs when available; fallback to bundled assets
-  const localPageImages = {
-    1: require('../../assets/books/pages/book_002_page-1.png'),
-    2: require('../../assets/books/pages/book_002_page-2.png'),
-    3: require('../../assets/books/pages/book_002_page-3.png'),
-    4: require('../../assets/books/pages/book_002_page-4.png'),
-    5: require('../../assets/books/pages/book_002_page-5.png'),
-    6: require('../../assets/books/pages/book_002_page-6.png'),
-    7: require('../../assets/books/pages/book_002_page-7.png'),
-  } as const;
-
+  // Prefer cloud URLs only; no static requires in release
   const getPageImageSource = (pageNumber: number) => {
     const pg = book.pages?.find(p => p.pageNumber === pageNumber);
     const uri = pg?.imageUrl;
     if (uri && (uri.startsWith('http://') || uri.startsWith('https://'))) {
       return { uri } as any;
     }
-    return (localPageImages as any)[pageNumber] || (localPageImages as any)[1];
+    return null;
   };
 
   useEffect(() => {

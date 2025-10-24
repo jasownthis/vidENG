@@ -1,5 +1,6 @@
 import { storage } from '../config/firebase';
-import { ref, uploadBytes, getDownloadURL, listAll, deleteObject, getMetadata } from 'firebase/storage';
+import { ref, getDownloadURL, listAll, deleteObject, getMetadata } from 'firebase/storage';
+import { getAuth } from 'firebase/auth';
 import { AudioRecording } from '../types';
 
 class StorageService {
@@ -15,7 +16,7 @@ class StorageService {
 
   /**
    * Construct the full file path for a specific page audio
-   * Format: audio_raw/grade_{gradeLevel}/{bookId}/{userId}/page_{pageNumber}_{timestamp}.wav
+   * Format: audio_raw/grade_{gradeLevel}/{bookId}/{userId}/page_{pageNumber}_{timestamp}.m4a
    */
   private getPageAudioPath(
     userId: string, 
@@ -26,14 +27,14 @@ class StorageService {
   ): string {
     const basePath = this.getAudioPath(userId, bookId, gradeLevel);
     const ts = timestamp || Date.now();
-    return `${basePath}/page_${pageNumber}_${ts}.wav`;
+    return `${basePath}/page_${pageNumber}_${ts}.m4a`;
   }
 
   /**
    * Upload a WAV audio file to Firebase Storage
    */
   async uploadAudioFile(
-    audioBlob: Blob,
+    audioBase64: string,
     userId: string,
     bookId: string,
     gradeLevel: number,
@@ -42,32 +43,84 @@ class StorageService {
   ): Promise<string> {
     try {
       const filePath = this.getPageAudioPath(userId, bookId, gradeLevel, pageNumber, timestamp);
-      const storageRef = ref(storage, filePath);
-      
-      console.log('Uploading audio to:', filePath);
-      
-      // Upload the audio blob
-      const snapshot = await uploadBytes(storageRef, audioBlob, {
-        contentType: 'audio/wav',
-        customMetadata: {
-          userId,
-          bookId,
-          pageNumber: pageNumber.toString(),
-          gradeLevel: gradeLevel.toString(),
-          uploadedAt: new Date().toISOString(),
-        }
+      console.log('Uploading audio via REST to:', filePath);
+
+      const bucket = (storage as any).app?.options?.storageBucket as string;
+      if (!bucket) throw new Error('Storage bucket not configured');
+
+      const currentUser = getAuth().currentUser;
+      const idToken = currentUser ? await currentUser.getIdToken() : null;
+      if (!idToken) throw new Error('Not authenticated');
+
+      // Firebase Storage simple upload endpoint (v0 API)
+      const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?name=${encodeURIComponent(filePath)}&uploadType=media`;
+      const bytes = StorageService.base64ToUint8Array(audioBase64);
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'audio/mp4',
+          'Authorization': `Bearer ${idToken}`,
+          'x-goog-meta-userId': userId,
+          'x-goog-meta-bookId': bookId,
+          'x-goog-meta-pageNumber': String(pageNumber),
+          'x-goog-meta-gradeLevel': String(gradeLevel),
+          'x-goog-meta-uploadedAt': new Date().toISOString(),
+        } as any,
+        body: bytes as any,
       });
-      
-      // Get the download URL
-      const downloadURL = await getDownloadURL(snapshot.ref);
-      console.log('Audio uploaded successfully:', downloadURL);
-      
+
+      if (!res.ok) {
+        const t = await StorageService.safeText(res);
+        throw new Error(`Firebase upload failed (${res.status}): ${t}`);
+      }
+
+      const meta = await res.json() as { bucket?: string; name?: string; downloadTokens?: string };
+      if (meta?.bucket && meta?.name && meta?.downloadTokens) {
+        const direct = `https://firebasestorage.googleapis.com/v0/b/${meta.bucket}/o/${encodeURIComponent(meta.name)}?alt=media&token=${meta.downloadTokens}`;
+        console.log('Audio uploaded successfully (REST token URL):', direct);
+        return direct;
+      }
+
+      const downloadURL = await getDownloadURL(ref(storage, filePath));
+      console.log('Audio uploaded successfully (SDK URL):', downloadURL);
       return downloadURL;
     } catch (error) {
       console.error('Error uploading audio file:', error);
       throw error;
     }
   }
+
+  // Helpers kept as private static to avoid leaking symbols outside module scope
+  private static base64ToUint8Array(base64: string): Uint8Array {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    const clean = base64.replace(/^data:[^;]+;base64,/, '');
+    const output: number[] = [];
+    let i = 0;
+    while (i < clean.length) {
+      const enc1 = chars.indexOf(clean[i++]);
+      const enc2 = chars.indexOf(clean[i++]);
+      const enc3 = chars.indexOf(clean[i++]);
+      const enc4 = chars.indexOf(clean[i++]);
+      const chr1 = (enc1 << 2) | (enc2 >> 4);
+      const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+      const chr3 = ((enc3 & 3) << 6) | enc4;
+      output.push(chr1);
+      if (enc3 !== 64) output.push(chr2);
+      if (enc4 !== 64) output.push(chr3);
+    }
+    return new Uint8Array(output);
+  }
+
+  private static async safeText(res: Response): Promise<string> {
+    try {
+      return await res.text();
+    } catch {
+      return '<no body>';
+    }
+  }
+
+// (class continues below)
 
   /**
    * Check if audio file exists for a specific page
@@ -87,7 +140,7 @@ class StorageService {
       
       // Find files for the specific page
       const pageFiles = listResult.items.filter(item => 
-        item.name.startsWith(`page_${pageNumber}_`) && item.name.endsWith('.wav')
+        item.name.startsWith(`page_${pageNumber}_`) && item.name.endsWith('.m4a')
       );
       
       if (pageFiles.length > 0) {
@@ -112,23 +165,7 @@ class StorageService {
     }
   }
 
-  /**
-   * Download an existing audio file as blob for merging
-   */
-  async downloadAudioFile(downloadURL: string): Promise<Blob> {
-    try {
-      const response = await fetch(downloadURL);
-      if (!response.ok) {
-        throw new Error(`Failed to download audio: ${response.statusText}`);
-      }
-      
-      const blob = await response.blob();
-      return blob;
-    } catch (error) {
-      console.error('Error downloading audio file:', error);
-      throw error;
-    }
-  }
+  // Removed blob download helper to avoid Blob usage on Hermes
 
   /**
    * List all audio files for a user's book
@@ -296,7 +333,7 @@ class StorageService {
    */
   generateAudioFileName(pageNumber: number, timestamp?: number): string {
     const ts = timestamp || Date.now();
-    return `page_${pageNumber}_${ts}.wav`;
+    return `page_${pageNumber}_${ts}.m4a`;
   }
 }
 
